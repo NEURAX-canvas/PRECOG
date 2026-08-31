@@ -1,7 +1,7 @@
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor, Var};
 use candle_nn::init::Init;
-use candle_nn::optim::{Optimizer as _, ParamsAdamW, AdamW, SGD};
+use candle_nn::optim::{AdamW, Optimizer as _, ParamsAdamW, SGD};
 use pretrainopt_core::{
     Activation, InitMethod, ModelArchitecture, ModelFeatures, Optimizer, TrainingConfig,
     TrialProtocol,
@@ -28,10 +28,17 @@ impl DenseLayer {
             InitMethod::Xavier => (2.0 / (in_dim + out_dim) as f64).sqrt(),
             InitMethod::He => (2.0 / in_dim as f64).sqrt(),
         };
-        let weight = Init::Randn { mean: 0.0, stdev: std }
-            .var((out_dim, in_dim), DType::F32, device)?;
+        let weight = Init::Randn {
+            mean: 0.0,
+            stdev: std,
+        }
+        .var((out_dim, in_dim), DType::F32, device)?;
         let bias = Init::Const(0.0).var(out_dim, DType::F32, device)?;
-        Ok(Self { weight, bias, activation })
+        Ok(Self {
+            weight,
+            bias,
+            activation,
+        })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
@@ -227,11 +234,19 @@ pub fn train(
         let indices = &order[batch_idx * batch_size..(batch_idx + 1) * batch_size];
 
         let batch_x = x_tensor.index_select(
-            &Tensor::from_vec(indices.iter().map(|i| *i as u32).collect(), indices.len(), &device)?,
+            &Tensor::from_vec(
+                indices.iter().map(|i| *i as u32).collect(),
+                indices.len(),
+                &device,
+            )?,
             0,
         )?;
         let batch_y = y_tensor.index_select(
-            &Tensor::from_vec(indices.iter().map(|i| *i as u32).collect(), indices.len(), &device)?,
+            &Tensor::from_vec(
+                indices.iter().map(|i| *i as u32).collect(),
+                indices.len(),
+                &device,
+            )?,
             0,
         )?;
 

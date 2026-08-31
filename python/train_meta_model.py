@@ -130,8 +130,13 @@ def main() -> None:
         models[col] = model
         encoders[col] = enc
 
-    print("\n--- Decision experiment (Annexe B #3): predicted H* vs default baseline ---")
-    wins, ties, losses, failures = 0, 0, 0, 0
+    # §28: replication is not optional -- a single training run per config/task
+    # confounds meta-model skill with plain training-run variance.
+    n_seeds = 5
+    max_steps_penalty = 800 * 2
+
+    print(f"\n--- Decision experiment (Annexe B #3): predicted H* vs default baseline ({n_seeds} seeds/task) ---")
+    wins, ties, losses = 0, 0, 0
     for idx, row in test_df.iterrows():
         features_row = x_test.loc[[idx]]
         predicted = {
@@ -154,31 +159,45 @@ def main() -> None:
             ),
         }
 
-        predicted_result = run_trial_for_task(row, predicted, seed=99)
-        baseline_result = run_trial_for_task(row, BASELINE_TRAINING, seed=99)
+        p_runs = [run_trial_for_task(row, predicted, seed=s) for s in range(n_seeds)]
+        b_runs = [run_trial_for_task(row, BASELINE_TRAINING, seed=s) for s in range(n_seeds)]
 
-        p_steps = predicted_result["steps_to_threshold"] if predicted_result["converged"] else None
-        b_steps = baseline_result["steps_to_threshold"] if baseline_result["converged"] else None
+        def penalized_steps(runs: list[dict]) -> list[float]:
+            return [
+                r["steps_to_threshold"] if r["converged"] else max_steps_penalty for r in runs
+            ]
+
+        p_steps = penalized_steps(p_runs)
+        b_steps = penalized_steps(b_runs)
+        p_mean, p_conv = float(np.mean(p_steps)), sum(r["converged"] for r in p_runs)
+        b_mean, b_conv = float(np.mean(b_steps)), sum(r["converged"] for r in b_runs)
 
         print(
-            f"task={row['task_id']:<40} predicted_steps={p_steps} baseline_steps={b_steps} "
+            f"task={row['task_id']:<40} "
+            f"predicted: mean_steps={p_mean:.0f} converged={p_conv}/{n_seeds}  "
+            f"baseline: mean_steps={b_mean:.0f} converged={b_conv}/{n_seeds}  "
             f"predicted_config={predicted}"
         )
 
-        if p_steps is None:
-            failures += 1
-        elif b_steps is None or p_steps < b_steps:
+        if p_mean < b_mean:
             wins += 1
-        elif p_steps == b_steps:
+        elif p_mean == b_mean:
             ties += 1
         else:
             losses += 1
 
-    print(f"\nwins={wins} ties={ties} losses={losses} predictor_failed_to_converge={failures} "
-          f"(out of {len(test_df)} held-out tasks)")
-    print("H1 verdict: meta-model beats default baseline on "
-          f"{wins}/{len(test_df)} held-out tasks "
-          f"({'PASS, see §24 success criterion (>=60%)' if wins / len(test_df) >= 0.6 else 'below the 60% MVP threshold -- see §24/§35'})")
+    n = len(test_df)
+    print(f"\nwins={wins} ties={ties} losses={losses} (out of {n} held-out tasks, "
+          f"{n_seeds} seeds/task, non-convergence penalized at {max_steps_penalty} steps)")
+    verdict = "PASS, see §24 success criterion (>=60%)" if wins / n >= 0.6 else "below the 60% MVP threshold -- see §24/§35"
+    print(f"H1 verdict: meta-model beats default baseline (by mean steps across {n_seeds} seeds) "
+          f"on {wins}/{n} held-out tasks ({verdict})")
+    print(
+        "Caveat: with only "
+        f"{n} held-out tasks this is directional, not statistically significant "
+        "-- §28 also calls for a paired significance test (e.g. Wilcoxon) once "
+        "there are enough held-out tasks for it to be meaningful (~10+)."
+    )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,6 @@
+/target
+/.venv
+__pycache__/
+*.pyc
+/data/*.jsonl
+.DS_Store

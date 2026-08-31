@@ -1,0 +1,9 @@
+[package]
+name = "pretrainopt-taskgen"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pretrainopt-core = { path = "../core" }
+rand.workspace = true
+rand_chacha.workspace = true

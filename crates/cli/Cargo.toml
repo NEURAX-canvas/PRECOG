@@ -1,0 +1,16 @@
+[package]
+name = "pretrainopt-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "pretrainopt-trial"
+path = "src/main.rs"
+
+[dependencies]
+pretrainopt-core = { path = "../core" }
+pretrainopt-taskgen = { path = "../taskgen" }
+pretrainopt-model = { path = "../model" }
+serde_json.workspace = true
+anyhow.workspace = true
+clap.workspace = true

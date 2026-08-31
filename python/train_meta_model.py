@@ -92,6 +92,16 @@ def main() -> None:
     df = load_meta_dataset()
     n_tasks = len(df)
     print(f"meta-dataset: {n_tasks} tasks with a converged best trial")
+
+    print("\n--- H4 check: how much does H* vary across tasks? ---")
+    lr = df["training.learning_rate"]
+    print(
+        f"learning_rate: mean={lr.mean():.4g} std={lr.std():.4g} "
+        f"coefficient_of_variation={lr.std() / lr.mean():.2f} "
+        f"min={lr.min():.4g} max={lr.max():.4g}"
+    )
+    for col in ["training.optimizer", "training.init_method", "training.batch_size"]:
+        print(f"{col}: {df[col].value_counts(normalize=True).round(2).to_dict()}")
     if n_tasks < 10:
         raise SystemExit("not enough converged tasks yet -- run python/run_search.py first")
 
@@ -150,7 +160,10 @@ def main() -> None:
         p_steps = predicted_result["steps_to_threshold"] if predicted_result["converged"] else None
         b_steps = baseline_result["steps_to_threshold"] if baseline_result["converged"] else None
 
-        print(f"task={row['task_id']:<40} predicted_steps={p_steps} baseline_steps={b_steps}")
+        print(
+            f"task={row['task_id']:<40} predicted_steps={p_steps} baseline_steps={b_steps} "
+            f"predicted_config={predicted}"
+        )
 
         if p_steps is None:
             failures += 1

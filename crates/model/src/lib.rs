@@ -277,3 +277,57 @@ pub fn train(
         wall_clock_ms,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn training_reduces_loss_on_a_trivial_task() {
+        let (x, y) = pretrainopt_taskgen_test_helper();
+
+        let architecture = ModelArchitecture {
+            input_dim: 4,
+            depth: 1,
+            width: 16,
+            activation: Activation::Relu,
+        };
+        let training = TrainingConfig {
+            learning_rate: 0.01,
+            batch_size: 16,
+            optimizer: Optimizer::AdamW,
+            weight_decay: 0.0,
+            init_method: InitMethod::He,
+        };
+        let protocol = TrialProtocol {
+            loss_threshold: 1e-6,
+            max_steps: 200,
+            seed: 0,
+        };
+
+        let outcome = train(&x, &y, &architecture, &training, &protocol).unwrap();
+
+        assert!(outcome.final_loss.is_finite());
+        assert!(!outcome.diverged);
+        assert!(outcome.grad_norm_final <= outcome.grad_norm_initial);
+        assert!(outcome.model_features.n_params > 0);
+    }
+
+    /// Minimal deterministic dataset (y = x1 + x2) without depending on the
+    /// taskgen crate, to keep this crate's tests self-contained.
+    fn pretrainopt_taskgen_test_helper() -> (Vec<Vec<f32>>, Vec<f32>) {
+        let mut x = Vec::new();
+        let mut y = Vec::new();
+        for i in 0..128 {
+            let row = vec![
+                (i as f32 * 0.037).sin(),
+                (i as f32 * 0.071).cos(),
+                (i as f32 * 0.013).sin(),
+                (i as f32 * 0.091).cos(),
+            ];
+            y.push(row[0] + row[1]);
+            x.push(row);
+        }
+        (x, y)
+    }
+}

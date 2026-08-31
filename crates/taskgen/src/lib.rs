@@ -124,3 +124,60 @@ fn pearson(a: &[f64], b: &[f64], n: usize) -> f64 {
         cov / (var_a.sqrt() * var_b.sqrt())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(function: TaskFunction, input_dim: usize, seed: u64) -> TaskConfig {
+        TaskConfig {
+            function,
+            input_dim,
+            noise_level: 0.1,
+            n_samples: 128,
+            seed,
+        }
+    }
+
+    #[test]
+    fn generates_expected_shapes() {
+        let (dataset, features) = generate(&config(TaskFunction::NonlinearInteraction, 6, 1));
+        assert_eq!(dataset.x.len(), 128);
+        assert_eq!(dataset.y.len(), 128);
+        assert!(dataset.x.iter().all(|row| row.len() == 6));
+        assert_eq!(features.input_dim, 6);
+        assert_eq!(features.n_samples, 128);
+    }
+
+    #[test]
+    fn same_seed_is_reproducible() {
+        let (a, _) = generate(&config(TaskFunction::Linear, 4, 42));
+        let (b, _) = generate(&config(TaskFunction::Linear, 4, 42));
+        assert_eq!(a.x, b.x);
+        assert_eq!(a.y, b.y);
+    }
+
+    #[test]
+    fn different_seeds_differ() {
+        let (a, _) = generate(&config(TaskFunction::Linear, 4, 1));
+        let (b, _) = generate(&config(TaskFunction::Linear, 4, 2));
+        assert_ne!(a.y, b.y);
+    }
+
+    #[test]
+    #[should_panic(expected = "input_dim too small")]
+    fn rejects_input_dim_below_minimum() {
+        generate(&config(TaskFunction::NonlinearInteraction, 2, 1));
+    }
+
+    #[test]
+    fn zero_noise_matches_analytic_function_exactly() {
+        let mut cfg = config(TaskFunction::Linear, 4, 5);
+        cfg.noise_level = 0.0;
+        let (dataset, _) = generate(&cfg);
+        for (row, &y) in dataset.x.iter().zip(dataset.y.iter()) {
+            let expected = row[0] + row[1];
+            assert!((expected - y).abs() < 1e-5);
+        }
+    }
+}

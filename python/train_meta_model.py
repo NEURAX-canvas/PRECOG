@@ -122,23 +122,24 @@ def main() -> None:
 
     print("\n--- Decision experiment (Annexe B #3): predicted H* vs default baseline ---")
     wins, ties, losses, failures = 0, 0, 0, 0
-    for _, row in test_df.iterrows():
+    for idx, row in test_df.iterrows():
+        features_row = x_test.loc[[idx]]
         predicted = {
-            "learning_rate": float(np.exp(models["training.learning_rate"].predict(row[FEATURE_COLS].to_frame().T)[0])),
-            "weight_decay": float(np.exp(models["training.weight_decay"].predict(row[FEATURE_COLS].to_frame().T)[0])),
+            "learning_rate": float(np.exp(models["training.learning_rate"].predict(features_row)[0])),
+            "weight_decay": float(np.exp(models["training.weight_decay"].predict(features_row)[0])),
             "batch_size": int(
                 encoders["training.batch_size"].inverse_transform(
-                    models["training.batch_size"].predict(row[FEATURE_COLS].to_frame().T)
+                    models["training.batch_size"].predict(features_row)
                 )[0]
             ),
             "optimizer": str(
                 encoders["training.optimizer"].inverse_transform(
-                    models["training.optimizer"].predict(row[FEATURE_COLS].to_frame().T)
+                    models["training.optimizer"].predict(features_row)
                 )[0]
             ),
             "init_method": str(
                 encoders["training.init_method"].inverse_transform(
-                    models["training.init_method"].predict(row[FEATURE_COLS].to_frame().T)
+                    models["training.init_method"].predict(features_row)
                 )[0]
             ),
         }

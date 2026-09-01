@@ -22,6 +22,7 @@ from pathlib import Path
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
+from scipy.stats import wilcoxon
 from sklearn.preprocessing import LabelEncoder
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -137,6 +138,8 @@ def main() -> None:
 
     print(f"\n--- Decision experiment (Annexe B #3): predicted H* vs default baseline ({n_seeds} seeds/task) ---")
     wins, ties, losses = 0, 0, 0
+    all_predicted_steps: list[float] = []
+    all_baseline_steps: list[float] = []
     for idx, row in test_df.iterrows():
         features_row = x_test.loc[[idx]]
         predicted = {
@@ -169,6 +172,8 @@ def main() -> None:
 
         p_steps = penalized_steps(p_runs)
         b_steps = penalized_steps(b_runs)
+        all_predicted_steps.extend(p_steps)
+        all_baseline_steps.extend(b_steps)
         p_mean, p_conv = float(np.mean(p_steps)), sum(r["converged"] for r in p_runs)
         b_mean, b_conv = float(np.mean(b_steps)), sum(r["converged"] for r in b_runs)
 
@@ -192,12 +197,24 @@ def main() -> None:
     verdict = "PASS, see §24 success criterion (>=60%)" if wins / n >= 0.6 else "below the 60% MVP threshold -- see §24/§35"
     print(f"H1 verdict: meta-model beats default baseline (by mean steps across {n_seeds} seeds) "
           f"on {wins}/{n} held-out tasks ({verdict})")
-    print(
-        "Caveat: with only "
-        f"{n} held-out tasks this is directional, not statistically significant "
-        "-- §28 also calls for a paired significance test (e.g. Wilcoxon) once "
-        "there are enough held-out tasks for it to be meaningful (~10+)."
-    )
+
+    # §28: paired significance test. Each (task, seed) pair trains predicted-H
+    # and baseline-H on the *same* synthetic sample (same task.seed), so the
+    # pairing is valid; note the n_seeds repeats per task are not independent
+    # of each other, so treat the p-value as indicative, not exact.
+    diffs = np.array(all_predicted_steps) - np.array(all_baseline_steps)
+    if np.all(diffs == 0):
+        print("Wilcoxon signed-rank: skipped (predicted and baseline are identical on every pair)")
+    else:
+        stat, p_value = wilcoxon(all_predicted_steps, all_baseline_steps)
+        print(
+            f"Wilcoxon signed-rank test (predicted vs baseline steps, n={len(diffs)} "
+            f"paired task-seed runs): statistic={stat:.1f} p_value={p_value:.4g} "
+            f"({'significant at p<0.05' if p_value < 0.05 else 'NOT significant at p<0.05'})"
+        )
+    if n < 10:
+        print(f"Caveat: only {n} held-out tasks -- treat both the win-rate and the "
+              "p-value above as directional, not conclusive (§28: aim for ~10+ held-out tasks).")
 
 
 if __name__ == "__main__":

@@ -19,28 +19,34 @@ rather than by assumption:
              correct for the fact that different init methods start at
              different loss scales (He vs Xavier give different weight norms)
 
-IMPORTANT -- v2 of this script fixes a validity gap in v1: the first version
-fixed learning_rate/weight_decay/batch_size at each task's *real* best-found
-H* (from Optuna) while calibrating, then the probe was deployed downstream
-using the meta-model's *predicted* (noisier, ~52% within 2x of true) values
-instead. That mismatch is almost certainly why the probe, calibrated at
-Spearman rho=0.56, produced zero net improvement once wired into the actual
-pipeline: it was calibrated under easier conditions than it was asked to run
-under.
+v2 of this script fixed a validity gap in v1: the first version fixed
+learning_rate/weight_decay/batch_size at each task's *real* best-found H*
+while calibrating, then the probe was deployed downstream using the
+meta-model's *predicted* (noisier) values instead. v2 closed that gap by
+evaluating under predicted H on a disjoint calibration split -- correlation
+actually improved (rho=0.66 @ 80 steps) but the probe *still* made the real
+pipeline significantly worse (fewer correct optimizer/init picks, slower
+convergence, p=0.027). That rules out the calibration/deployment mismatch as
+the cause.
 
-This version closes that gap: it carves the training tasks into an inner
-training set (used to fit the exact same meta-model as train_meta_model.py)
-and a held-out calibration set, then evaluates the probe using each
-calibration task's *predicted* learning_rate/weight_decay/batch_size --
-exactly what it will see in production. The 20% final test set from
-train_meta_model.py is never touched here.
+v3 (this version) tests the remaining hypothesis: a *single-seed* probe is
+too noisy to use as a per-task argmin decision, even though its rank
+correlation averaged over many tasks looks reasonable. Every combo gets
+re-initialized randomly (candle has no init seeding), so one 80-step probe
+per combo is really "one noisy sample" of that combo's typical behavior.
+Averaging the probe score over K independent seeds before ranking should
+reduce that per-decision noise -- if it doesn't, the probe idea itself (not
+just its calibration) is the problem.
 
-For each calibration task, at its predicted (lr, weight_decay, batch_size):
+For each calibration task, at its predicted (lr, weight_decay, batch_size),
+for the already-identified best budget/formula (80 steps, raw loss):
   1. runs full training (800 steps) for all 6 optimizer x init combos to get
-     the true ranking (by steps_to_threshold, non-convergence penalized), and
-  2. runs short probes at several budgets for both formulas,
-then reports, per budget x formula, the average per-task Spearman rank
-correlation with the true ranking.
+     the true ranking, and
+  2. runs 10 independent 80-step probes per combo (different seeds),
+then for K in {1, 3, 5, 10}, averages the first K probe scores per combo and
+reports both the Spearman rank correlation AND the top-1 accuracy (does the
+K-seed argmin match the true best combo?) against the true ranking -- top-1
+accuracy is what the pipeline actually depends on, correlation is a proxy.
 
 Usage:
     python3 python/calibrate_probe.py --n-tasks 30
@@ -63,7 +69,8 @@ TRIAL_BINARY = REPO_ROOT / "target" / "release" / "pretrainopt-trial"
 
 OPTIMIZERS = ["Sgd", "Adam", "AdamW"]
 INIT_METHODS = ["Xavier", "He"]
-PROBE_BUDGETS = [5, 10, 20, 40, 80, 160]
+PROBE_BUDGET = 80  # best single-seed budget found by v1/v2 of this script
+SEED_COUNTS = [1, 3, 5, 10]
 FULL_MAX_STEPS = 800
 FULL_LOSS_THRESHOLD = 0.05
 NON_CONVERGENCE_PENALTY = FULL_MAX_STEPS * 2
@@ -117,10 +124,11 @@ def main() -> None:
 
     models, encoders = fit_meta_models(inner_train_df)
 
-    # correlations[budget][formula] = list of per-task Spearman rho
-    correlations: dict[int, dict[str, list[float]]] = {
-        b: {"raw_loss": [], "ratio": []} for b in PROBE_BUDGETS
-    }
+    max_k = max(SEED_COUNTS)
+    # correlations[K] / top1_hits[K] accumulate across calibration tasks
+    correlations: dict[int, list[float]] = {k: [] for k in SEED_COUNTS}
+    top1_hits: dict[int, int] = {k: 0 for k in SEED_COUNTS}
+    n_ranked_tasks = 0
 
     for _, task_row in calib_tasks.iterrows():
         features_row = pd.DataFrame([task_row[FEATURE_COLS]])
@@ -132,7 +140,8 @@ def main() -> None:
         }
 
         true_steps = {}
-        probes: dict[int, dict] = {b: {} for b in PROBE_BUDGETS}
+        # per_seed_scores[combo] = list of max_k independent probe scores
+        per_seed_scores: dict[tuple, list[float]] = {}
 
         for optimizer in OPTIMIZERS:
             for init_method in INIT_METHODS:
@@ -144,19 +153,16 @@ def main() -> None:
                     full["steps_to_threshold"] if full["converged"] else NON_CONVERGENCE_PENALTY
                 )
 
-                for budget in PROBE_BUDGETS:
-                    probe = run(task_row, training, budget, -1.0, seed=0)
-                    loss_0 = probe["initial_loss"]
+                scores = []
+                for seed in range(max_k):
+                    probe = run(task_row, training, PROBE_BUDGET, -1.0, seed=seed)
                     loss_t = probe["final_loss"]
-                    if not np.isfinite(loss_t) or not np.isfinite(loss_0) or loss_0 == 0:
-                        raw_score, ratio_score = float("inf"), float("inf")
-                    else:
-                        raw_score = loss_t
-                        ratio_score = loss_t / loss_0
-                    probes[budget][combo] = (raw_score, ratio_score)
+                    scores.append(loss_t if np.isfinite(loss_t) else float("inf"))
+                per_seed_scores[combo] = scores
 
         combos = list(true_steps.keys())
         true_rank = [true_steps[c] for c in combos]
+        true_best = min(true_steps, key=true_steps.get)
         if len(set(true_rank)) <= 1:
             # All 6 combos tied (typically: none of them converged within the
             # full budget) -- there is nothing to rank, and this task can't
@@ -164,33 +170,26 @@ def main() -> None:
             print(f"task={task_row['task_id']:<40} true_best=TIE (no usable ranking, skipped)")
             continue
 
-        for budget in PROBE_BUDGETS:
-            raw_rank = [probes[budget][c][0] for c in combos]
-            ratio_rank = [probes[budget][c][1] for c in combos]
-            if len(set(raw_rank)) > 1:
-                correlations[budget]["raw_loss"].append(spearmanr(raw_rank, true_rank).statistic)
-            if len(set(ratio_rank)) > 1:
-                correlations[budget]["ratio"].append(spearmanr(ratio_rank, true_rank).statistic)
+        n_ranked_tasks += 1
+        for k in SEED_COUNTS:
+            avg_scores = [float(np.mean(per_seed_scores[c][:k])) for c in combos]
+            if len(set(avg_scores)) > 1:
+                correlations[k].append(spearmanr(avg_scores, true_rank).statistic)
+            picked = combos[int(np.argmin(avg_scores))]
+            top1_hits[k] += int(picked == true_best)
 
-        print(f"task={task_row['task_id']:<40} true_best={min(true_steps, key=true_steps.get)}")
+        print(f"task={task_row['task_id']:<40} true_best={true_best}")
 
-    print(f"\n--- Probe formula calibration ({len(calib_tasks)} training tasks, "
-          f"{len(OPTIMIZERS) * len(INIT_METHODS)} combos/task) ---")
-    print("Spearman rank correlation between probe ranking and true full-training ranking")
-    print(f"{'budget':>8} {'raw_loss (mean±std)':>24} {'ratio loss_T/loss_0 (mean±std)':>32}")
-    best_budget, best_formula, best_corr = None, None, -2.0
-    for budget in PROBE_BUDGETS:
-        for formula in ["raw_loss", "ratio"]:
-            vals = correlations[budget][formula]
-            if vals and np.mean(vals) > best_corr:
-                best_corr, best_budget, best_formula = np.mean(vals), budget, formula
-        raw = correlations[budget]["raw_loss"]
-        ratio = correlations[budget]["ratio"]
-        print(f"{budget:>8} {np.mean(raw):>10.2f} ± {np.std(raw):<10.2f} "
-              f"{np.mean(ratio):>14.2f} ± {np.std(ratio):<10.2f}")
+    print(f"\n--- Multi-seed probe calibration ({n_ranked_tasks} usable tasks, "
+          f"budget={PROBE_BUDGET} steps, raw_loss) ---")
+    print(f"{'K seeds':>8} {'Spearman rho (mean±std)':>26} {'top-1 accuracy':>16}")
+    for k in SEED_COUNTS:
+        vals = correlations[k]
+        acc = 100 * top1_hits[k] / n_ranked_tasks
+        print(f"{k:>8} {np.mean(vals):>12.2f} ± {np.std(vals):<10.2f} {acc:>14.0f}%")
 
-    print(f"\nBest formula: {best_formula} at budget={best_budget} steps "
-          f"(mean Spearman rho={best_corr:.2f})")
+    print("\n(for reference: picking a combo at random would average "
+          f"{100 / (len(OPTIMIZERS) * len(INIT_METHODS)):.0f}% top-1 accuracy)")
 
 
 if __name__ == "__main__":

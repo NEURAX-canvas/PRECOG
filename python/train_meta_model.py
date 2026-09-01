@@ -81,14 +81,14 @@ def fit_meta_models(train_df: pd.DataFrame) -> tuple[dict, dict]:
 
     for col in TARGETS_REGRESSION:
         y = np.log(train_df[col].astype(float))
-        model = lgb.LGBMRegressor(n_estimators=100, min_child_samples=3, verbosity=-1)
+        model = lgb.LGBMRegressor(n_estimators=100, min_child_samples=3, verbosity=-1, random_state=0)
         model.fit(x_train, y)
         models[col] = model
 
     for col in TARGETS_CLASSIFICATION:
         enc = LabelEncoder()
         y = enc.fit_transform(train_df[col].astype(str))
-        model = lgb.LGBMClassifier(n_estimators=100, min_child_samples=3, verbosity=-1)
+        model = lgb.LGBMClassifier(n_estimators=100, min_child_samples=3, verbosity=-1, random_state=0)
         model.fit(x_train, y)
         models[col] = model
         encoders[col] = enc

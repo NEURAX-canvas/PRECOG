@@ -54,6 +54,23 @@ CREATE TABLE IF NOT EXISTS experiments (
     wall_clock_s REAL,
     delta_w_norm REAL
 );
+
+-- Progression gates (docs.md §17): "each gate is validated by independent
+-- metrics, on locked datasets, before considering the next generation" --
+-- so the history of every check must persist, not just the latest run's
+-- console output, to actually compare generations over time.
+CREATE TABLE IF NOT EXISTS gate_evaluations (
+    evaluation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+    generation TEXT NOT NULL,
+    gate_number INTEGER NOT NULL,
+    metric_name TEXT NOT NULL,
+    metric_value REAL NOT NULL,
+    threshold REAL NOT NULL,
+    passed INTEGER NOT NULL,
+    n_samples INTEGER,
+    notes TEXT
+);
 """
 
 
@@ -61,7 +78,7 @@ CREATE TABLE IF NOT EXISTS experiments (
 def connect():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
-    conn.execute(_SCHEMA)
+    conn.executescript(_SCHEMA)
     try:
         yield conn
         conn.commit()
@@ -111,6 +128,37 @@ def record_experiment(
             ),
         )
         return cursor.lastrowid
+
+
+def record_gate_evaluation(
+    *,
+    generation: str,
+    gate_number: int,
+    metric_name: str,
+    metric_value: float,
+    threshold: float,
+    n_samples: int | None = None,
+    notes: str | None = None,
+) -> int:
+    passed = abs(metric_value) >= threshold if metric_value is not None else False
+    with connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO gate_evaluations (
+                generation, gate_number, metric_name, metric_value, threshold,
+                passed, n_samples, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (generation, gate_number, metric_name, metric_value, threshold, int(passed), n_samples, notes),
+        )
+        return cursor.lastrowid
+
+
+def load_gate_history():
+    import pandas as pd
+
+    with connect() as conn:
+        return pd.read_sql_query("SELECT * FROM gate_evaluations ORDER BY timestamp", conn)
 
 
 def load_dataframe(split: str | None = None):

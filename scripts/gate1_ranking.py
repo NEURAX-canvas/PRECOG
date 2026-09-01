@@ -32,8 +32,11 @@ import numpy as np
 import torch
 from scipy.stats import spearmanr
 
-from precog.model import Activation, InitMethod, ModelArchitecture, build_mlp
+from precog.experiment_db import record_experiment, record_gate_evaluation
+from precog.hardware import hardware_features
+from precog.model import Activation, InitMethod, ModelArchitecture, build_mlp, model_features
 from precog.modes import Mode, TrainingConfig, TrainProtocol, train
+from precog.regime import detect_regime
 from precog.taskgen import TaskConfig, TaskFunction, generate
 from precog.trainability import zero_cost_features
 
@@ -86,6 +89,9 @@ def main() -> None:
             torch.manual_seed(0)
             pure_model = build_mlp(architecture, init_method)
             zc = zero_cost_features(pure_model, task_config.input_dim, x, y)
+            model_feat = model_features(pure_model, architecture, init_method)
+            hw_feat = hardware_features()
+            regime = detect_regime(model_feat, task_feat, hw_feat)
 
             # FULL TRAINING: ground truth, a fresh model of its own.
             protocol = TrainProtocol(
@@ -96,6 +102,30 @@ def main() -> None:
             )
             result = train(architecture, x, y, training, protocol)
             true_steps = result.steps_to_threshold if result.converged else NON_CONVERGENCE_PENALTY
+
+            # §12: every experiment is recorded, not just printed. These
+            # diagnostic runs aren't part of the Meta-Predictor's locked
+            # train/test split (build_meta_dataset.py owns that), so they're
+            # tagged "train" -- exploratory, never used for a final gate
+            # evaluation of the Meta-Predictor itself.
+            record_experiment(
+                split="train",
+                seed=task_config.seed,
+                mode=Mode.FULL_TRAINING.value,
+                model_features=model_feat,
+                task_features=task_feat,
+                hardware_features=hw_feat,
+                regime=regime,
+                training_config={
+                    "learning_rate": training.learning_rate,
+                    "batch_size": training.batch_size,
+                    "optimizer": training.optimizer,
+                    "weight_decay": training.weight_decay,
+                    "init_method": training.init_method.value,
+                },
+                outcome=result,
+                zero_cost_features=zc,
+            )
 
             rows.append({**zc, "true_steps": true_steps, "task": task_config.function.value})
             print(
@@ -114,6 +144,7 @@ def main() -> None:
     print(f"\n--- Gate 1: ranking correlation (n={len(rows)} rows, "
           f"{len(TASKS)} tasks x {len(INIT_METHODS)} init methods, optimizer/LR/batch fixed) ---")
 
+    per_proxy_results = {}
     combined_z = np.zeros(len(rows))
     for proxy in proxies:
         values = np.array([r[proxy] for r in rows])
@@ -122,6 +153,7 @@ def main() -> None:
             continue
         rho, p_value = spearmanr(values, true_steps_arr)
         print(f"{proxy:<28} rho={rho:+.3f}  p={p_value:.3g}")
+        per_proxy_results[proxy] = (rho, p_value)
         combined_z += (values - values.mean()) / (values.std() + 1e-12) * np.sign(rho or 1)
 
     rho_combined, p_combined = spearmanr(combined_z, true_steps_arr)
@@ -130,6 +162,69 @@ def main() -> None:
     gate1_pass = abs(rho_combined) >= 0.70
     print(f"\nGate 1 (docs.md §17, target |rho| >= 0.70) on the init-only controlled "
           f"experiment: {'PASS' if gate1_pass else 'NOT YET MET'} (|rho|={abs(rho_combined):.3f})")
+
+    # §17: persist every gate check so generations can actually be compared
+    # over time, not just read off the console of whoever ran this last.
+    record_gate_evaluation(
+        generation="v1-trainability-engine",
+        gate_number=1,
+        metric_name="spearman_rho_naive_combined_zero_cost_vs_steps",
+        metric_value=float(rho_combined),
+        threshold=0.70,
+        n_samples=len(rows),
+        notes=f"controlled experiment (§21): {len(TASKS)} tasks x {len(INIT_METHODS)} init methods, "
+              f"optimizer/LR/batch fixed",
+    )
+    for proxy, (rho, _p) in per_proxy_results.items():
+        record_gate_evaluation(
+            generation="v1-trainability-engine",
+            gate_number=1,
+            metric_name=f"spearman_rho_{proxy}_vs_steps",
+            metric_value=float(rho),
+            threshold=0.70,
+            n_samples=len(rows),
+            notes="individual proxy, not the combined score used for the official gate verdict",
+        )
+
+    from precog.reporting import export_csv_snapshots, write_report
+
+    proxy_table = "\n".join(
+        f"| {proxy} | {rho:+.3f} | {p:.3g} |" for proxy, (rho, p) in sorted(
+            per_proxy_results.items(), key=lambda kv: -abs(kv[1][0])
+        )
+    )
+    report = f"""## Method
+
+Controlled experiment per docs.md §21: only `init_method` varies
+({", ".join(m.value for m in INIT_METHODS)}); architecture, task, learning
+rate ({FIXED_LEARNING_RATE}), batch size ({FIXED_BATCH_SIZE}) and optimizer
+({FIXED_OPTIMIZER}) are all fixed. {len(TASKS)} synthetic tasks x
+{len(INIT_METHODS)} init methods = {len(rows)} rows. Zero-cost features
+computed in PURE mode (DeltaW=0); ground truth from FULL_TRAINING
+(max {FULL_MAX_STEPS} steps, threshold {FULL_LOSS_THRESHOLD}).
+
+## Results
+
+| proxy | rho | p-value |
+|---|---:|---:|
+{proxy_table}
+| **naive combined (avg z-score)** | **{rho_combined:+.3f}** | {p_combined:.3g} |
+
+## Verdict
+
+Gate 1 (docs.md §17, target \\|rho\\| >= 0.70): **{'PASS' if gate1_pass else 'NOT YET MET'}**
+(\\|rho\\| = {abs(rho_combined):.3f})
+
+Every proxy above is computed in PURE mode, strictly before any
+optimizer/LR/batch_size is chosen (DeltaW=0) -- so this experiment can only
+test whether the Trainability Engine explains *initialization* quality. It
+cannot rank optimizer/LR/batch_size choices by construction; that needs the
+Meta-Predictor (§9.7), see the meta-predictor evaluation report.
+"""
+    export_csv_snapshots()
+    report_path = write_report("gate1_ranking", "Gate 1 — Ranking Correlation (Trainability Engine)", report)
+    print(f"\nReport written to {report_path.relative_to(report_path.parents[2])}")
+    print("Meta-dataset snapshot refreshed in results/experiments.csv and results/gate_evaluations.csv")
 
     print(
         "\nNote (§9.4, §5): every proxy above is computed in PURE mode, strictly before any\n"

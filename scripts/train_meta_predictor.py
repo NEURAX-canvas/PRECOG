@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 import pandas as pd
 
-from precog.experiment_db import load_dataframe
+from precog.experiment_db import load_dataframe, record_gate_evaluation
 from precog.meta_knowledge_base import MetaKnowledgeBase
 from precog.meta_predictor import MetaPredictor, engineer_features
 
@@ -62,6 +62,7 @@ def main() -> None:
 
     hits, universal_hits, confidences = 0, 0, []
     n_test_tasks = 0
+    detail_rows = []
     for seed, group in test_df.groupby("seed"):
         n_test_tasks += 1
         features_row = group.iloc[[0]]
@@ -73,6 +74,10 @@ def main() -> None:
         hits += int(hit)
         universal_hits += int(universal_init == true_best_init)
         confidences.append(rec.confidence)
+        detail_rows.append(
+            f"| {seed} | {true_best_init} | {rec.recommended_init.value} | {rec.confidence:.2f} | "
+            f"{rec.expected_steps:.0f} | {rec.steps_range[0]:.0f}-{rec.steps_range[1]:.0f} | {hit} |"
+        )
 
         print(f"seed={seed:<5} true_best={true_best_init:<11} predicted={rec.recommended_init.value:<11} "
               f"confidence={rec.confidence:.2f} expected_steps={rec.expected_steps:.0f} "
@@ -94,6 +99,68 @@ def main() -> None:
     else:
         print("\n-> H4 not refuted here: the universal init does at least as well as the "
               "learned Meta-Predictor on this test set.")
+
+    # §17: Gate 2 is specified as Recall@10; with only 3 candidate init
+    # methods, top-1 accuracy is the closest well-defined analogue (Recall@3
+    # would be trivially 100%), so it's logged as an explicitly-noted
+    # adapted version of Gate 2, not a literal Recall@10.
+    record_gate_evaluation(
+        generation="v1-meta-predictor",
+        gate_number=2,
+        metric_name="top1_accuracy_init_method_adapted_recall_at_10",
+        metric_value=accuracy,
+        threshold=0.80,
+        n_samples=n_test_tasks,
+        notes=f"adapted Gate 2 (3-way choice, not 10): universal baseline={universal_accuracy:.2f}, "
+              f"random baseline={random_baseline:.2f}, mean confidence={np.mean(confidences):.2f}",
+    )
+
+    from precog.reporting import export_csv_snapshots, write_report
+
+    verdict = ("H1 supported over H4 at this scale: conditioning on task/model features beats a "
+               "single universal init choice." if accuracy > universal_accuracy else
+               "H4 not refuted here: the universal init does at least as well as the learned "
+               "Meta-Predictor on this test set.")
+    calibration_flag = (
+        "**Calibration warning (§23 'poorly calibrated uncertainty')**: mean confidence "
+        f"({np.mean(confidences):.2f}) is well above the actual accuracy ({accuracy:.2f}) -- "
+        "the confidence score should not be trusted at this meta-dataset size."
+        if np.mean(confidences) - accuracy > 0.15 else ""
+    )
+    report = f"""## Method
+
+Meta-Predictor (docs.md §9.7) trained on {len(train_df)} rows ({train_df['seed'].nunique()} tasks)
+from the TRAIN split, evaluated exactly once on the locked TEST split
+({len(test_df)} rows, {test_df['seed'].nunique()} tasks) per §12/§15.1.
+Pipeline order: Model/Data/Hardware Encoders + Regime Detector (already
+logged when the meta-dataset was built) -> Meta-Knowledge Base (§9.6, fit
+on TRAIN only) -> Meta-Predictor (§9.7, random-forest ensemble, one head:
+expected steps_to_threshold per candidate init_method).
+
+## Results
+
+| seed | true best init | predicted | confidence | expected steps | range | hit |
+|---|---|---|---:|---:|---|---|
+{chr(10).join(detail_rows)}
+
+| Method | Accuracy |
+|---|---:|
+| Meta-Predictor (top-1) | {accuracy:.0%} ({hits}/{n_test_tasks}) |
+| Universal-config baseline | {universal_accuracy:.0%} ({universal_hits}/{n_test_tasks}) |
+| Random baseline (3 classes) | {random_baseline:.0%} |
+
+Mean confidence: {np.mean(confidences):.2f}
+
+## Verdict
+
+{verdict}
+
+{calibration_flag}
+"""
+    export_csv_snapshots()
+    report_path = write_report("meta_predictor_eval", "Meta-Predictor Evaluation (Locked Test Split)", report)
+    print(f"\nReport written to {report_path.relative_to(report_path.parents[2])}")
+    print("Meta-dataset snapshot refreshed in results/experiments.csv and results/gate_evaluations.csv")
 
 
 if __name__ == "__main__":

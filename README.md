@@ -175,6 +175,7 @@ Ce tableau doit être maintenu à jour au fil du projet — chaque case droite q
 ## 7. Existing Projects
 
 - **Google Vizier** — service de black-box optimization (Bayesian optimization + bandits), utilisé en interne chez Google. Analyse détaillée au §8.
+- **OSS Vizier / "Towards Learning Universal Hyperparameter Optimizers with Transformers" (Google, 2022)** — évolution de la lignée Vizier vers un modèle appris (Transformer) sur des milliers d'études passées pour orienter la recherche dans une nouvelle étude. Signal important : même la philosophie « boîte noire » de Vizier dérive vers un pari structurellement proche de H1 (une relation apprise à travers les tâches transfère) — appliqué *pendant* la recherche plutôt qu'en zero-shot avant elle comme le vise PreTrainOpt. Le désaccord avec Vizier n'est donc pas philosophique mais empirique : à partir de quand la connaissance structurelle vaut-elle plus cher que le coût de l'ignorer ? (voir postscript empirique, §8).
 - **Optuna** — framework open-source de HPO, TPE (Tree-structured Parzen Estimator), pruning intégré (early stopping des essais peu prometteurs).
 - **Ray Tune / Hyperband / ASHA** — recherche à grande échelle avec arrêt précoce agressif des essais peu prometteurs (successive halving).
 - **Population Based Training (PBT, DeepMind)** — hybride évolution + recherche, mute les hyperparamètres *pendant* l'entraînement plutôt qu'entre essais séparés.
@@ -187,6 +188,12 @@ Ce tableau doit être maintenu à jour au fil du projet — chaque case droite q
 ---
 
 ## 8. Google Vizier — Analyse
+
+**Philosophie.** La phrase d'ouverture de l'abstract du papier Vizier (Golovin et al., 2017) résume toute sa position : *« Any sufficiently complex system acts as a black box when it becomes easier to experiment with than to understand. »* Ce n'est pas un aveu de défaite mais un choix pragmatique assumé : plutôt que de comprendre pourquoi un système se comporte comme il le fait, on le traite comme une fonction opaque \(f(x)\) et on optimise par expérimentation.
+
+Cette philosophie est honnête sur ses limites et cohérente avec son objectif : Vizier ne fait aucune hypothèse sur la structure du problème, ce qui le rend *universel* (il devient le moteur de tuning par défaut chez Google, réutilisé jusque dans HyperTune sur Google Cloud ML) — un système qui marche pour n'importe quel \(f(x)\) a une valeur d'ingénierie énorme précisément parce qu'il ne présuppose rien. C'est un papier de *systems engineering* appliqué à l'optimisation (robustesse, passage à l'échelle, service partagé entre milliers d'équipes aux problèmes hétérogènes), pas un papier qui cherche à percer la dynamique d'apprentissage.
+
+La limite structurelle correspondante — et le point exact où PreTrainOpt se positionne en opposition — est que « boîte noire » veut dire qu'on jette l'information structurelle à chaque nouvelle recherche. Vizier ne sait pas qu'un Transformer à 12 couches et un Transformer à 24 couches partagent une géométrie de perte apparentée (ce que µP exploite explicitement, §9) ; chaque nouvelle tâche redémarre, sauf warm-start manuel. « Plus facile d'expérimenter que de comprendre » est vrai à l'échelle d'ingénierie — un choix rationnel quand on doit servir des milliers d'équipes internes sous contrainte de temps produit — mais ça fige la question de recherche : on optimise, on ne cherche jamais à savoir *pourquoi* telle région de l'espace des hyperparamètres fonctionne. C'est précisément l'angle mort que H1 attaque.
 
 **Principe.** Vizier traite l'entraînement comme une fonction boîte noire \(f(x)\) à optimiser :
 
@@ -213,6 +220,14 @@ PreTrainOpt :    Model/Task analysis → Prediction → Configuration → (Probe
 ```
 
 **Rôle de Vizier dans notre projet.** Il n'est pas un concurrent à remplacer d'emblée mais un **outil pour construire le meta-dataset** : pendant la phase de recherche (laboratoire synthétique), Vizier (ou un équivalent Bayesian optimization) sert à trouver la configuration quasi-optimale *réelle* de chaque tâche synthétique — ce résultat devient un exemple d'entraînement pour notre meta-modèle. Vizier est donc utilisé **hors ligne**, comme génération de vérité terrain, pas comme composant du système final.
+
+**Postscript empirique (MVP, prototype Rust/Optuna/LightGBM du §39).** Le premier prototype construit dans le cadre de ce document a donné une illustration concrète, à petite échelle, de ce compromis boîte-noire vs. structure :
+
+- Le signal structurel existe mais est faible et inégal selon l'hyperparamètre. Sur 110 tâches synthétiques (MLP, régression), un meta-modèle gradient boosting prédit le learning rate optimal avec une corrélation modeste (rho ≈ 0.36, 52 % des prédictions à moins de 2× de la vraie valeur) — un vrai signal, loin d'être suffisant seul. Pour optimizer/init_method en revanche, le même meta-modèle prédisait **moins bien qu'une règle triviale** (toujours répondre la classe majoritaire) : 33-57 % de précision contre 43-67 % pour la baseline naïve.
+- Tenter d'exploiter plus de structure (un *few-step probe* inspiré de l'early stopping de Vizier — quelques dizaines de steps réels avant de choisir optimizer/init) a d'abord **activement nui** : calibré à une seule graine, il rendait les prédictions significativement pires (p = 0.027) qu'ignorer le probe. La cause : chaque essai repart d'une initialisation aléatoire différente, donc un probe à une seule graine par candidat est une mesure bruitée, pas un verdict fiable.
+- Moyenner le probe sur 10 graines indépendantes a corrigé la précision brute (45 % → 62 % de bonnes réponses optimizer/init) sans pour autant produire un gain net et significatif de vitesse de convergence (8 victoires / 13 défaites sur 21 tâches tenues à l'écart, p = 0.19) — signe que l'étiquette « meilleure config » elle-même est bruitée (le paysage de qualité entre combinaisons est probablement assez plat pour beaucoup de tâches).
+
+Ce n'est ni une validation ni une réfutation de H1 : c'est la démonstration empirique, en miniature, de la thèse de ce paragraphe — exploiter la structure plutôt que la boîte noire est possible mais coûte cher en rigueur méthodologique (calibration, réplication, seeds), et peut activement nuire si elle est mal exécutée. La boîte noire ne gagne pas parce qu'elle est meilleure ; elle gagne par défaut tant que l'exploitation de la structure n'a pas été correctement maîtrisée.
 
 ---
 

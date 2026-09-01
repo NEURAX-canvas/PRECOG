@@ -71,6 +71,54 @@ def universal_config(train_df: pd.DataFrame) -> dict:
     }
 
 
+def fit_meta_models(train_df: pd.DataFrame) -> tuple[dict, dict]:
+    """Trains the gradient-boosting meta-model (§14) on `train_df`. Shared by
+    train_meta_model.py's decision experiment and calibrate_probe.py, so both
+    always predict H* the exact same way."""
+    x_train = train_df[FEATURE_COLS]
+    encoders: dict[str, LabelEncoder] = {}
+    models: dict[str, object] = {}
+
+    for col in TARGETS_REGRESSION:
+        y = np.log(train_df[col].astype(float))
+        model = lgb.LGBMRegressor(n_estimators=100, min_child_samples=3, verbosity=-1)
+        model.fit(x_train, y)
+        models[col] = model
+
+    for col in TARGETS_CLASSIFICATION:
+        enc = LabelEncoder()
+        y = enc.fit_transform(train_df[col].astype(str))
+        model = lgb.LGBMClassifier(n_estimators=100, min_child_samples=3, verbosity=-1)
+        model.fit(x_train, y)
+        models[col] = model
+        encoders[col] = enc
+
+    return models, encoders
+
+
+def predict_config(features_row: pd.DataFrame, models: dict, encoders: dict) -> dict:
+    """Predicts a full H from one row of FEATURE_COLS using fitted meta-models."""
+    return {
+        "learning_rate": float(np.exp(models["training.learning_rate"].predict(features_row)[0])),
+        "weight_decay": float(np.exp(models["training.weight_decay"].predict(features_row)[0])),
+        "batch_size": int(
+            encoders["training.batch_size"].inverse_transform(
+                models["training.batch_size"].predict(features_row)
+            )[0]
+        ),
+        "optimizer": str(
+            encoders["training.optimizer"].inverse_transform(
+                models["training.optimizer"].predict(features_row)
+            )[0]
+        ),
+        "init_method": str(
+            encoders["training.init_method"].inverse_transform(
+                models["training.init_method"].predict(features_row)
+            )[0]
+        ),
+    }
+
+
 def load_meta_dataset() -> pd.DataFrame:
     records = [json.loads(line) for line in EXPERIMENT_DB.open()]
     df = pd.json_normalize(records)
@@ -170,25 +218,8 @@ def main() -> None:
     test_df = df.iloc[:n_test]
     train_df = df.iloc[n_test:]
 
-    x_train = train_df[FEATURE_COLS]
     x_test = test_df[FEATURE_COLS]
-
-    encoders: dict[str, LabelEncoder] = {}
-    models: dict[str, object] = {}
-
-    for col in TARGETS_REGRESSION:
-        y = np.log(train_df[col].astype(float))
-        model = lgb.LGBMRegressor(n_estimators=100, min_child_samples=3, verbosity=-1)
-        model.fit(x_train, y)
-        models[col] = model
-
-    for col in TARGETS_CLASSIFICATION:
-        enc = LabelEncoder()
-        y = enc.fit_transform(train_df[col].astype(str))
-        model = lgb.LGBMClassifier(n_estimators=100, min_child_samples=3, verbosity=-1)
-        model.fit(x_train, y)
-        models[col] = model
-        encoders[col] = enc
+    models, encoders = fit_meta_models(train_df)
 
     # §28: replication is not optional -- a single training run per config/task
     # confounds meta-model skill with plain training-run variance.
@@ -210,25 +241,7 @@ def main() -> None:
     all_probed_steps: list[float] = []
     for idx, row in test_df.iterrows():
         features_row = x_test.loc[[idx]]
-        predicted = {
-            "learning_rate": float(np.exp(models["training.learning_rate"].predict(features_row)[0])),
-            "weight_decay": float(np.exp(models["training.weight_decay"].predict(features_row)[0])),
-            "batch_size": int(
-                encoders["training.batch_size"].inverse_transform(
-                    models["training.batch_size"].predict(features_row)
-                )[0]
-            ),
-            "optimizer": str(
-                encoders["training.optimizer"].inverse_transform(
-                    models["training.optimizer"].predict(features_row)
-                )[0]
-            ),
-            "init_method": str(
-                encoders["training.init_method"].inverse_transform(
-                    models["training.init_method"].predict(features_row)
-                )[0]
-            ),
-        }
+        predicted = predict_config(features_row, models, encoders)
 
         probed_optimizer, probed_init = probe_pick_optimizer_init(
             row, predicted["learning_rate"], predicted["weight_decay"], predicted["batch_size"]

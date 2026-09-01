@@ -19,10 +19,23 @@ rather than by assumption:
              correct for the fact that different init methods start at
              different loss scales (He vs Xavier give different weight norms)
 
-For a sample of *training* tasks (never the held-out test set), and with
-learning_rate/weight_decay/batch_size fixed at that task's real best-found H*
-(so only optimizer x init_method varies -- the two hyperparameters the static
-meta-model failed hardest on), it:
+IMPORTANT -- v2 of this script fixes a validity gap in v1: the first version
+fixed learning_rate/weight_decay/batch_size at each task's *real* best-found
+H* (from Optuna) while calibrating, then the probe was deployed downstream
+using the meta-model's *predicted* (noisier, ~52% within 2x of true) values
+instead. That mismatch is almost certainly why the probe, calibrated at
+Spearman rho=0.56, produced zero net improvement once wired into the actual
+pipeline: it was calibrated under easier conditions than it was asked to run
+under.
+
+This version closes that gap: it carves the training tasks into an inner
+training set (used to fit the exact same meta-model as train_meta_model.py)
+and a held-out calibration set, then evaluates the probe using each
+calibration task's *predicted* learning_rate/weight_decay/batch_size --
+exactly what it will see in production. The 20% final test set from
+train_meta_model.py is never touched here.
+
+For each calibration task, at its predicted (lr, weight_decay, batch_size):
   1. runs full training (800 steps) for all 6 optimizer x init combos to get
      the true ranking (by steps_to_threshold, non-convergence penalized), and
   2. runs short probes at several budgets for both formulas,
@@ -30,7 +43,7 @@ then reports, per budget x formula, the average per-task Spearman rank
 correlation with the true ranking.
 
 Usage:
-    python3 python/calibrate_probe.py --n-tasks 15
+    python3 python/calibrate_probe.py --n-tasks 30
 """
 from __future__ import annotations
 
@@ -43,7 +56,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
-from train_meta_model import load_meta_dataset
+from train_meta_model import FEATURE_COLS, fit_meta_models, load_meta_dataset, predict_config
 
 REPO_ROOT = Path(__file__).resolve().parents[0].parent
 TRIAL_BINARY = REPO_ROOT / "target" / "release" / "pretrainopt-trial"
@@ -84,16 +97,25 @@ def run(task_row: pd.Series, training: dict, max_steps: int, loss_threshold: flo
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--n-tasks", type=int, default=15)
+    parser.add_argument("--n-tasks", type=int, default=30)
     args = parser.parse_args()
 
     df = load_meta_dataset()
-    df = df.sample(frac=1.0, random_state=1).reset_index(drop=True)
-    # Mirror train_meta_model's split exactly so we only ever touch training
-    # tasks here -- the held-out 20% must stay untouched for the final test.
+    df = df.sample(frac=1.0, random_state=0).reset_index(drop=True)
+    # Mirror train_meta_model's outer split exactly so the final 20% test set
+    # is never touched here, then carve the remaining 80% into an inner
+    # training set (fits the meta-model) and a calibration set (evaluated
+    # under that meta-model's *predicted* H, not the real one).
     n_test = max(1, int(0.2 * len(df)))
     train_df = df.iloc[n_test:].reset_index(drop=True)
-    calib_tasks = train_df.sample(n=min(args.n_tasks, len(train_df)), random_state=2)
+
+    n_calib = min(args.n_tasks, max(1, int(0.3 * len(train_df))))
+    calib_tasks = train_df.sample(n=n_calib, random_state=2)
+    inner_train_df = train_df.drop(calib_tasks.index)
+    print(f"inner_train={len(inner_train_df)} calib={len(calib_tasks)} "
+          f"(final held-out test set of {n_test} tasks untouched)")
+
+    models, encoders = fit_meta_models(inner_train_df)
 
     # correlations[budget][formula] = list of per-task Spearman rho
     correlations: dict[int, dict[str, list[float]]] = {
@@ -101,10 +123,12 @@ def main() -> None:
     }
 
     for _, task_row in calib_tasks.iterrows():
+        features_row = pd.DataFrame([task_row[FEATURE_COLS]])
+        predicted = predict_config(features_row, models, encoders)
         base_training = {
-            "learning_rate": float(task_row["training.learning_rate"]),
-            "weight_decay": float(task_row["training.weight_decay"]),
-            "batch_size": int(task_row["training.batch_size"]),
+            "learning_rate": predicted["learning_rate"],
+            "weight_decay": predicted["weight_decay"],
+            "batch_size": predicted["batch_size"],
         }
 
         true_steps = {}

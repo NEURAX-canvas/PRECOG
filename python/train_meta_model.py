@@ -160,13 +160,16 @@ def run_trial_for_task(
     return json.loads(proc.stdout)
 
 
-# Calibrated in python/calibrate_probe.py, v2: raw loss after 80 steps gave
-# the best rank correlation (Spearman rho=0.66) with the true full-training
-# ranking when evaluated under the meta-model's *predicted* (not real) H --
-# the same noisy inputs this probe actually sees in the pipeline below.
-# Clearly better than normalizing by the initial loss; correlation degrades
-# again at 160 steps.
+# Calibrated in python/calibrate_probe.py:
+#   v2 found raw loss after 80 steps gives the best rank correlation
+#   (rho=0.66) under the meta-model's *predicted* (not real) H.
+#   v3 found a *single* 80-step probe per combo is too noisy to use as a
+#   per-task argmin: top-1 accuracy was only 24% (vs 17% random chance).
+#   Averaging PROBE_SEEDS=10 independent probes per combo raised that to 44%
+#   without changing the average rank correlation much -- the averaging
+#   reduces per-decision variance rather than improving the signal itself.
 PROBE_BUDGET = 80
+PROBE_SEEDS = 10
 PROBE_OPTIMIZERS = ["Sgd", "Adam", "AdamW"]
 PROBE_INIT_METHODS = ["Xavier", "He"]
 
@@ -174,10 +177,12 @@ PROBE_INIT_METHODS = ["Xavier", "He"]
 def probe_pick_optimizer_init(
     task_row: pd.Series, learning_rate: float, weight_decay: float, batch_size: int
 ) -> tuple[str, str]:
-    """Picks (optimizer, init_method) by running a cheap 40-step probe for
-    each of the 6 combinations and keeping the one with the lowest raw loss
-    after the probe -- rather than the static classifier, which measured
-    worse than a majority-class baseline for both of these targets."""
+    """Picks (optimizer, init_method) by running PROBE_SEEDS independent
+    80-step probes for each of the 6 combinations and keeping the one with
+    the lowest *average* raw loss after the probe -- rather than the static
+    classifier, which measured worse than a majority-class baseline for both
+    of these targets, or a single-seed probe, which was too noisy to trust
+    for a per-task decision (§15/H5 calibration, see calibrate_probe.py)."""
     best_combo, best_score = None, float("inf")
     for optimizer in PROBE_OPTIMIZERS:
         for init_method in PROBE_INIT_METHODS:
@@ -188,10 +193,13 @@ def probe_pick_optimizer_init(
                 "optimizer": optimizer,
                 "init_method": init_method,
             }
-            result = run_trial_for_task(
-                task_row, training, seed=0, max_steps=PROBE_BUDGET, loss_threshold=-1.0
-            )
-            score = result["final_loss"] if np.isfinite(result["final_loss"]) else float("inf")
+            losses = []
+            for seed in range(PROBE_SEEDS):
+                result = run_trial_for_task(
+                    task_row, training, seed=seed, max_steps=PROBE_BUDGET, loss_threshold=-1.0
+                )
+                losses.append(result["final_loss"] if np.isfinite(result["final_loss"]) else float("inf"))
+            score = float(np.mean(losses))
             if score < best_score:
                 best_score, best_combo = score, (optimizer, init_method)
     return best_combo

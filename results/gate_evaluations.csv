@@ -22,3 +22,4 @@ evaluation_id,timestamp,generation,gate_number,metric_name,metric_value,threshol
 21,2026-09-01 14:24:40,v1-meta-predictor-knn,2,top1_accuracy_init_method_adapted_recall_at_10,0.38333333333333336,0.8,0,60,"universal_baseline=0.38, random_baseline=0.33, mean_confidence=0.54, winner=no"
 22,2026-09-01 14:24:40,v1-meta-predictor-zc_gradnormvar,2,top1_accuracy_init_method_adapted_recall_at_10,0.38333333333333336,0.8,0,60,"universal_baseline=0.38, random_baseline=0.33, mean_confidence=nan, winner=no"
 23,2026-09-01 14:24:40,v1-meta-predictor-zc_jacobcov,2,top1_accuracy_init_method_adapted_recall_at_10,0.4666666666666667,0.8,0,60,"universal_baseline=0.38, random_baseline=0.33, mean_confidence=nan, winner=no"
+24,2026-09-01 14:29:10,v1-lsuv-init,1,lsuv_wins_rate,0.08333333333333333,0.25,0,12,"means={'xavier': 142.41666666666666, 'he': 126.83333333333333, 'orthogonal': 123.16666666666667, 'lsuv': 159.41666666666666}, lsuv_beats_all_analytic_on_average=False"

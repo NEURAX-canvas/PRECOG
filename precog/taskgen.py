@@ -1,0 +1,68 @@
+"""Synthetic regression task generator (docs.md §15.2 "Laboratoire synthétique",
+curriculum Niveau 1). Same generative functions as the earlier Rust prototype,
+ported here so the whole V1 stack lives in one language (stack.md §1/§7:
+PyTorch first, no Rust before the meta-predictor is validated)."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+
+import numpy as np
+import torch
+
+
+class TaskFunction(str, Enum):
+    LINEAR = "linear"
+    NONLINEAR_INTERACTION = "nonlinear_interaction"
+    NONLINEAR_PRODUCT = "nonlinear_product"
+
+
+_MIN_INPUT_DIM = {
+    TaskFunction.LINEAR: 2,
+    TaskFunction.NONLINEAR_INTERACTION: 4,
+    TaskFunction.NONLINEAR_PRODUCT: 3,
+}
+
+
+@dataclass
+class TaskConfig:
+    function: TaskFunction
+    input_dim: int
+    noise_level: float
+    n_samples: int
+    seed: int
+
+
+def _eval_function(function: TaskFunction, x: np.ndarray) -> np.ndarray:
+    if function == TaskFunction.LINEAR:
+        return x[:, 0] + x[:, 1]
+    if function == TaskFunction.NONLINEAR_INTERACTION:
+        return np.sin(x[:, 0]) + 0.5 * x[:, 1] ** 2 - x[:, 2] * x[:, 3]
+    if function == TaskFunction.NONLINEAR_PRODUCT:
+        return np.sin(x[:, 0] * x[:, 1]) + np.exp(-x[:, 2])
+    raise ValueError(function)
+
+
+def generate(config: TaskConfig) -> tuple[torch.Tensor, torch.Tensor, dict]:
+    """Returns (x, y, task_features). task_features are the only descriptors
+    a PURE-mode data encoder (docs.md §9.2) is allowed to compute: no model
+    ever sees more of the dataset than these statistics plus mini-batches."""
+    if config.input_dim < _MIN_INPUT_DIM[config.function]:
+        raise ValueError(
+            f"input_dim too small for {config.function}: need >= {_MIN_INPUT_DIM[config.function]}"
+        )
+    rng = np.random.default_rng(config.seed)
+    x = rng.standard_normal((config.n_samples, config.input_dim)).astype(np.float32)
+    y = _eval_function(config.function, x)
+    y = y + rng.standard_normal(config.n_samples).astype(np.float32) * config.noise_level
+
+    corr = np.corrcoef(x, rowvar=False)
+    off_diag = corr[np.triu_indices_from(corr, k=1)]
+    features = {
+        "input_dim": config.input_dim,
+        "noise_level": config.noise_level,
+        "n_samples": config.n_samples,
+        "target_variance": float(np.var(y)),
+        "feature_correlation_mean": float(np.mean(np.abs(off_diag))) if off_diag.size else 0.0,
+    }
+    return torch.from_numpy(x), torch.from_numpy(y).unsqueeze(1), features

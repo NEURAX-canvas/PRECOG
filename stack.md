@@ -1,101 +1,101 @@
-## Stack recommandée pour PRECOG — avec preuves
+## Recommended stack for PRECOG — with evidence
 
-Je structure la stack par couche architecturale (cf. §8-9 du document), en distinguant volontairement **environnement de recherche** (Python) et **portage production** (Rust), comme le prévoit déjà la spec (§2 : *"ton objectif initial n'est pas la performance du framework, mais la validation scientifique de l'hypothèse"*). Pour chaque brique, je donne la preuve qui justifie le choix plutôt qu'une alternative.
-
----
-
-### 1. Socle de calcul — PyTorch (pas JAX, pas Rust natif au départ)
-
-**Choix : PyTorch + écosystème `torch.func`**
-
-Preuve : `torch.func` (ex-functorch) fournit `jacrev`/`jacfwd` composables avec `vmap` pour calculer des **Jacobiens batchés** sans boucle Python — exactement ce dont a besoin le Trainability Engine (§9.4, §11) pour les statistiques de gradient/Jacobien/conditionnement sur mini-batch :
-
-jacrev() peut être composé avec vmap pour produire des Jacobiens batchés, et si vous rencontrez des problèmes de mémoire en calculant le Jacobien, vous pouvez spécifier un chunk_size non nul. La version vectorisée est significativement plus rapide qu'une boucle manuelle sur les lignes du Jacobien selon la documentation officielle des tutoriels PyTorch, la version avec vmap est bien plus rapide que la version sans, et devient encore plus rapide à mesure que le nombre de sorties augmente.
-
-C'est directement le bon outil pour PRECOG-0 (mode PURE) : forward pass, Jacobien, conditionnement, sans jamais appeler `optimizer.step()`.
+I structure the stack by architectural layer (cf. docs.md §8-9), deliberately distinguishing the **research environment** (Python) from the **production port** (Rust), as the spec already anticipates (§2: *"your initial goal is not framework performance, but the scientific validation of the hypothesis"*). For each layer, I give the evidence that justifies the choice over an alternative.
 
 ---
 
-### 2. Meta-Predictor & incertitude — GPyTorch + ensembles
+### 1. Compute substrate — PyTorch (not JAX, not native Rust to start)
 
-**Choix : GPyTorch pour les processus gaussiens (petits meta-datasets), + ensembles de réseaux/quantile regression pour les grands volumes**
+**Choice: PyTorch + the `torch.func` ecosystem**
 
-GPyTorch est le moteur d'inférence gaussienne utilisé nativement par BoTorch, donc il n'y a pas de couture à faire entre "prédiction avec incertitude" et "moteur de recherche" — les deux partagent le même tenseur PyTorch de bout en bout (voir point 3).
+Evidence: `torch.func` (formerly functorch) provides `jacrev`/`jacfwd` composable with `vmap` to compute **batched Jacobians** without a Python loop — exactly what the Trainability Engine (§9.4, §11) needs for gradient/Jacobian/conditioning statistics on a mini-batch:
 
----
+`jacrev()` can be composed with `vmap` to produce batched Jacobians, and if you run into memory issues computing the Jacobian, you can specify a non-zero `chunk_size`. Per the official PyTorch tutorial documentation, the vectorized version is significantly faster than a manual loop over the Jacobian's rows — the `vmap` version is much faster than the non-vmap version, and becomes even faster as the number of outputs grows.
 
-### 3. Search Engine (Bayesian Optimization) — BoTorch + Ax comme cœur, Optuna comme couche légère optionnelle
-
-**Choix : BoTorch (bas niveau) piloté par Ax (haut niveau)**
-
-C'est exactement l'architecture "moteur / carrosserie" que la spec décrit en §9.8 (Vizier/BO comme bras d'exploration, pas cerveau) :
-
-BoTorch implémente des briques modulaires pour l'optimisation bayésienne moderne. Il fait le pont entre recherche et production en étant à la fois un framework de recherche très flexible et une implémentation fiable de qualité production. Ax est une plateforme d'expérimentation séquentielle qui s'appuie sur BoTorch pour implémenter les algorithmes d'optimisation bayésienne, mais fournit des APIs de plus haut niveau pour spécifier les problèmes, visualiser les résultats et benchmarker de nouveaux algorithmes ; elle inclut aussi une gestion puissante des métadonnées et du stockage des résultats.
-
-Le projet est activement maintenu — le changelog montre des versions publiées en juin 2026, avec le remplacement de Pyro par NumPyro pour l'inférence NUTS entièrement bayésienne, apportant une réduction importante du temps de fit, et l'exigence de PyTorch>=2.4. C'est un point important pour PRECOG : la partie "fully Bayesian" (SAASBO) sert précisément à gérer les espaces de recherche haute dimension du §10 (architecture + optimisation + régularisation combinées).
-
-**Optuna** reste pertinent comme **moteur léger d'ablation rapide** (§19) quand on veut juste comparer des variantes de PRECOG sans monter toute l'infrastructure Ax — mais pas comme moteur principal, car Ax offre nativement la gestion du meta-data que PRECOG doit de toute façon construire.
+This is directly the right tool for PRECOG-0 (PURE mode): forward pass, Jacobian, conditioning, without ever calling `optimizer.step()`.
 
 ---
 
-### 4. Benchmarks scientifiques — **ne pas reprendre NAS-Bench-201/HPOBench tels quels**
+### 2. Meta-Predictor & uncertainty — GPyTorch + ensembles
 
-C'est le point le plus important à corriger par rapport à la première version du document : les deux benchmarks de référence cités (§15.2) sont aujourd'hui **dépréciés ou quasi à l'arrêt**.
+**Choice: GPyTorch for Gaussian processes (small meta-datasets), + network ensembles/quantile regression for large volumes**
 
-- NAS-Bench-201 : depuis que NAS-Bench-201 a été étendu vers NATS-Bench, ce dépôt est déprécié et non maintenu ; il est recommandé d'utiliser NATS-Bench, qui contient 5 fois plus d'informations sur les architectures et une API plus rapide.
-- HPOBench : les dernières releases GitHub remontent à plusieurs années, la version 0.0.10 corrige la gestion d'un paramètre d'agent PPO et la clé de signature du commit a expiré — signe clair d'un projet peu actif.
+GPyTorch is the Gaussian inference engine natively used by BoTorch, so there's no seam to sew between "prediction with uncertainty" and "search engine" — both share the same PyTorch tensor end to end (see point 3).
 
-**Recommandation corrigée :**
-| Ancien choix | Remplacement recommandé | Preuve |
+---
+
+### 3. Search Engine (Bayesian Optimization) — BoTorch + Ax as the core, Optuna as an optional lightweight layer
+
+**Choice: BoTorch (low level) driven by Ax (high level)**
+
+This is exactly the "engine / chassis" architecture the spec describes in §9.8 (Vizier/BO as an exploration arm, not the brain):
+
+BoTorch implements modular building blocks for modern Bayesian optimization. It bridges research and production by being both a highly flexible research framework and a reliable, production-quality implementation. Ax is a sequential experimentation platform that relies on BoTorch to implement Bayesian optimization algorithms, but provides higher-level APIs for specifying problems, visualizing results, and benchmarking new algorithms; it also includes powerful metadata and results-storage management.
+
+The project is actively maintained — the changelog shows releases as recent as June 2026, with Pyro replaced by NumPyro for fully Bayesian NUTS inference, bringing a significant reduction in fit time, and a requirement of PyTorch>=2.4. This matters for PRECOG: the "fully Bayesian" part (SAASBO) is precisely meant to handle the high-dimensional search spaces of §10 (architecture + optimization + regularization combined).
+
+**Optuna** remains relevant as a **lightweight rapid-ablation engine** (§19) when you just want to compare PRECOG variants without standing up the whole Ax infrastructure — but not as the main engine, since Ax natively provides the meta-data management PRECOG needs to build anyway.
+
+---
+
+### 4. Scientific benchmarks — **do not reuse NAS-Bench-201/HPOBench as-is**
+
+This is the most important correction relative to the first version of the document: the two reference benchmarks cited (§15.2) are today **deprecated or nearly inactive**.
+
+- NAS-Bench-201: since NAS-Bench-201 was extended into NATS-Bench, this repository is deprecated and unmaintained; it is recommended to use NATS-Bench, which contains 5x more architecture information and a faster API.
+- HPOBench: the latest GitHub releases date back several years; version 0.0.10 fixes handling of a PPO agent parameter, and the commit signing key has expired — a clear sign of a barely-active project.
+
+**Corrected recommendation:**
+| Old choice | Recommended replacement | Evidence |
 |---|---|---|
-| NAS-Bench-201 | **NATS-Bench** | successeur officiel, maintenu, 5× plus de données |
-| — | **NAS-Bench-Suite-Zero** (automl/NASLib) | les auteurs prévoient de maintenir activement le dépôt et accueillent les contributions de la communauté — c'est en plus le benchmark *conçu spécifiquement* pour évaluer des zero-cost proxies, donc directement aligné avec PRECOG-0 |
-| HPOBench | **HPO-B** ou **JAHS-Bench** | JAHS-Bench est cité dans la littérature récente (2025) comme benchmark actif pour l'optimisation jointe architecture+hyperparamètres, ce qui correspond exactement à l'espace de recherche multi-niveaux du §10 |
+| NAS-Bench-201 | **NATS-Bench** | official successor, maintained, 5x more data |
+| — | **NAS-Bench-Suite-Zero** (automl/NASLib) | the authors plan to actively maintain the repository and welcome community contributions — it is also the benchmark *specifically designed* to evaluate zero-cost proxies, so directly aligned with PRECOG-0 |
+| HPOBench | **HPO-B** or **JAHS-Bench** | JAHS-Bench is cited in recent literature (2025) as an active benchmark for joint architecture+hyperparameter optimization, which matches exactly the multi-level search space of §10 |
 
-Un raccourci pratique utile pour prototyper vite : `simple-hpo-bench`, qui fournit un ensemble de datasets de benchmark HPO mono-objectif incluant HPOBench, HPOLib et NAS-Bench-201 derrière une API unifiée — utile en V1/V2 (§25) avant d'investir dans NATS-Bench/JAHS en V4-V5.
-
----
-
-### 5. Meta-dataset & tracking — réutiliser l'existant plutôt que réinventer
-
-Vu ton architecture MLOps déjà en place (MLflow → ArgoCD, cluster GPU K8s), la question n'est pas "quel outil" mais "faut-il en ajouter un nouveau". Réponse : non.
-
-MLflow est recommandé si vous devez self-hoster, garder chaque métrique et artefact dans votre propre réseau, ou éviter la facturation par siège — c'est exactement ton contexte (souveraineté des données d'expérience, déjà self-hosted). Comparé à W&B : MLflow est entièrement open-source et self-hosted sous licence Apache 2.0, donnant un contrôle complet sur l'infrastructure ML, alors que W&B propose une expérience managée.
-
-**Recommandation :** garder MLflow comme registre d'expériences (compatible avec ton toolchain ArgoCD existant), et l'adosser à **Postgres** pour les métadonnées structurées du meta-dataset (§12) + **DuckDB/Parquet** pour l'analyse embarquée offline (ablations, corrélations, requêtes ad hoc sur des millions de lignes d'expériences sans monter un cluster analytique).
+A practical shortcut useful for fast prototyping: `simple-hpo-bench`, which provides a set of single-objective HPO benchmark datasets including HPOBench, HPOLib, and NAS-Bench-201 behind a unified API — useful in V1/V2 (§25) before investing in NATS-Bench/JAHS in V4-V5.
 
 ---
 
-### 6. Orchestration & infra — réutiliser `ai-helm`, ne pas en créer une nouvelle
+### 5. Meta-dataset & tracking — reuse what exists rather than reinvent it
 
-Le pipeline PRECOG (§14) est fondamentalement un DAG d'expériences avec budgets adaptatifs (FULL TRAINING, PROBE) : c'est exactement ce que ton architecture existante (StatefulSet serving, Kubernetes GPU orchestration avec MIG/KEDA/Volcano/Kueue) sait déjà faire pour la partie allocation dynamique de ressources GPU. Le Short-Probe adaptatif (§9.10) mappe naturellement sur Kueue/Volcano pour la priorisation de jobs courts vs longs.
+Given your MLOps architecture already in place (MLflow → ArgoCD, K8s GPU cluster), the question isn't "which tool" but "should we add a new one at all". Answer: no.
+
+MLflow is recommended if you need to self-host, keep every metric and artifact within your own network, or avoid per-seat billing — exactly your context (data sovereignty over experiment data, already self-hosted). Compared to W&B: MLflow is fully open-source and self-hosted under the Apache 2.0 license, giving full control over the ML infrastructure, whereas W&B offers a managed experience.
+
+**Recommendation:** keep MLflow as the experiment registry (compatible with your existing ArgoCD toolchain), backed by **Postgres** for structured meta-dataset metadata (§12) + **DuckDB/Parquet** for embedded offline analysis (ablations, correlations, ad hoc queries over millions of experiment rows without standing up an analytics cluster).
 
 ---
 
-### 7. Portage production — Rust, cohérent avec UMC, mais **pas dès la V1**
+### 6. Orchestration & infra — reuse `ai-helm`, don't build a new one
 
-C'est là où ton profil change la réponse par rapport à une réponse "générique". Le choix n'est pas Candle *ou* Burn *ou* tch-rs — c'est une question de phase :
+The PRECOG pipeline (§14) is fundamentally a DAG of experiments with adaptive budgets (FULL TRAINING, PROBE): exactly what your existing architecture (StatefulSet serving, Kubernetes GPU orchestration with MIG/KEDA/Volcano/Kueue) already knows how to do for the dynamic GPU resource-allocation part. The adaptive Short-Probe (§9.10) maps naturally onto Kueue/Volcano for prioritizing short vs. long jobs.
 
-| Phase | Besoin | Choix | Preuve |
+---
+
+### 7. Production port — Rust, consistent with UMC, but **not from V1**
+
+This is where your profile changes the answer relative to a "generic" one. The choice isn't Candle *or* Burn *or* tch-rs — it's a question of phase:
+
+| Phase | Need | Choice | Evidence |
 |---|---|---|---|
-| Recherche (V1-V4) | Autodiff complet, Jacobien, GP, BO | **PyTorch** | aucun concurrent Rust n'a l'équivalent de `torch.func`/GPyTorch/BoTorch aujourd'hui |
-| Inférence PURE en production (V5-V6, une fois le meta-predictor figé) | Charger un modèle entraîné, calculer les zero-cost proxies et scorer, sans entraînement | **tch-rs** si tu dois réutiliser des poids PyTorch entraînés tel quel, **Candle** si tu veux du HuggingFace-natif | pour la performance, en particulier dans les environnements accélérés GPU, tch-rs est le choix le plus clair car il s'appuie sur le backend hautement optimisé de PyTorch, alors que Candle bénéficie d'un fort support de l'écosystème HuggingFace |
-| Composant natif Rust long terme (aligné UMC) | Zero dépendance Python en prod, cohérence avec ta philosophie "native Rust only" | **Burn** | en 2026, Burn atteint la v0.15.0 avec un support CPU/GPU/WebAssembly via CubeCL et une "production readiness" jugée haute, contre Candle jugé "modérée" en production readiness — mais Burn reste, par sa propre littérature, encore en retrait sur l'entraînement de gros modèles, actuellement en manque de maturité et d'optimisation pour des projets GPU-intensifs à grande échelle |
+| Research (V1-V4) | Full autodiff, Jacobian, GP, BO | **PyTorch** | no Rust competitor today has the equivalent of `torch.func`/GPyTorch/BoTorch |
+| PURE inference in production (V5-V6, once the meta-predictor is frozen) | Load a trained model, compute zero-cost proxies and score, without training | **tch-rs** if you must reuse trained PyTorch weights as-is, **Candle** if you want HuggingFace-native | for performance, particularly in GPU-accelerated environments, tch-rs is the clearest choice because it relies on PyTorch's highly optimized backend, whereas Candle benefits from strong HuggingFace ecosystem support |
+| Long-term native Rust component (aligned with UMC) | Zero Python dependency in production, consistent with your "native Rust only" philosophy | **Burn** | in 2026, Burn reaches v0.15.0 with CPU/GPU/WebAssembly support via CubeCL and a "production readiness" judged high, versus Candle judged "moderate" in production readiness — but by its own documentation Burn still lags on training large models, currently lacking maturity and optimization for large-scale GPU-intensive projects |
 
-**Recommandation concrète :** ne pas chercher à faire du Rust pur dès la V1 — la valeur scientifique de PRECOG (§14-19) doit être démontrée en PyTorch, où l'écosystème d'incertitude/BO est incomparablement plus mûr. Le portage Rust (probablement Burn, par cohérence avec UMC et parce que sa feuille de route production est la plus favorable des trois selon le comparatif 2026) n'a de sens qu'en V5-V6, pour la partie **inférence PURE** uniquement (scoring zero-cost + prédiction, pas l'entraînement du meta-predictor lui-même).
+**Concrete recommendation:** don't try to go pure-Rust starting at V1 — PRECOG's scientific value (§14-19) must be demonstrated in PyTorch, where the uncertainty/BO ecosystem is incomparably more mature. The Rust port (probably Burn, for consistency with UMC and because its production roadmap is the most favorable of the three per the 2026 comparison) only makes sense at V5-V6, for the **PURE inference** part only (zero-cost scoring + prediction, not training the meta-predictor itself).
 
 ---
 
-### 8. Récapitulatif
+### 8. Summary
 
-| Couche | Choix | Alternative rejetée | Raison |
+| Layer | Choice | Rejected alternative | Reason |
 |---|---|---|---|
-| Calcul/autodiff | PyTorch + `torch.func` | JAX | écosystème BO/GP (BoTorch/GPyTorch) plus mûr et interopérable |
-| Incertitude | GPyTorch (+ ensembles) | — | natif BoTorch |
-| Search engine | BoTorch + Ax | Vizier open-source, Optuna seul | Ax gère nativement le meta-data management dont PRECOG a besoin |
-| Benchmarks | NATS-Bench, NAS-Bench-Suite-Zero, JAHS-Bench/HPO-B | NAS-Bench-201, HPOBench | dépréciés / peu maintenus |
-| Tracking/meta-dataset | MLflow + Postgres + DuckDB | W&B | cohérent avec ton infra existante, self-hosted, pas de per-seat |
-| Orchestration | K8s existant (ai-helm) | nouveau système dédié | réutilisation directe des mécanismes MIG/Kueue déjà en place |
-| Production/inférence | Burn (cible), tch-rs (transition) | Candle seul | meilleure trajectoire "production readiness" 2026, cohérent avec la philosophie native-Rust d'UMC |
+| Compute/autodiff | PyTorch + `torch.func` | JAX | more mature and interoperable BO/GP ecosystem (BoTorch/GPyTorch) |
+| Uncertainty | GPyTorch (+ ensembles) | — | native to BoTorch |
+| Search engine | BoTorch + Ax | open-source Vizier, Optuna alone | Ax natively handles the meta-data management PRECOG needs anyway |
+| Benchmarks | NATS-Bench, NAS-Bench-Suite-Zero, JAHS-Bench/HPO-B | NAS-Bench-201, HPOBench | deprecated / poorly maintained |
+| Tracking/meta-dataset | MLflow + Postgres + DuckDB | W&B | consistent with your existing infra, self-hosted, no per-seat cost |
+| Orchestration | existing K8s (ai-helm) | a new dedicated system | direct reuse of the MIG/Kueue mechanisms already in place |
+| Production/inference | Burn (target), tch-rs (transition) | Candle alone | better 2026 "production readiness" trajectory, consistent with UMC's native-Rust philosophy |
 
-Le point le plus actionnable immédiatement : corriger le choix de benchmarks (§15.2 et §18 du document) — NATS-Bench + NAS-Bench-Suite-Zero au lieu de NAS-Bench-201/HPOBench, car ces derniers ne recevront plus de mises à jour ni de support communautaire actif.
+The single most immediately actionable point: fix the benchmark choice (§15.2 and §18 of the document) — NATS-Bench + NAS-Bench-Suite-Zero instead of NAS-Bench-201/HPOBench, since the latter will no longer receive updates or active community support.

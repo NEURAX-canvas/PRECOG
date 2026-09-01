@@ -1,125 +1,125 @@
 # PRECOG
 ## Predictive Configuration & Trainability Engine
-### Document de vision, spécification scientifique et feuille de route de recherche
+### Vision document, scientific specification, and research roadmap
 
 ---
 
-## 0. Avertissement méthodologique
+## 0. Methodological disclaimer
 
-Toutes les valeurs numériques citées dans ce document (Recall@10 ≥ 90 %, Spearman ρ ≥ 0.90, réduction de compute ≥ 70 %, réduction de données, erreur de prédiction ≤ 5–10 %, etc.) sont des **objectifs expérimentaux à démontrer**, pas des résultats déjà obtenus. Les tableaux d'ablation présentés en exemple sont des **gabarits attendus**, pas des mesures réelles. Ce document est une spécification de recherche, pas un rapport de résultats.
+All numerical values cited in this document (Recall@10 ≥ 90%, Spearman ρ ≥ 0.90, compute reduction ≥ 70%, data reduction, prediction error ≤ 5–10%, etc.) are **experimental targets to be demonstrated**, not results already obtained. The ablation tables shown as examples are **expected templates**, not real measurements. This document is a research specification, not a results report.
 
 ---
 
-## 1. Résumé exécutif
+## 1. Executive Summary
 
-**PRECOG** est un système de recherche visant à transformer le problème classique d'optimisation d'hyperparamètres (HPO) en un problème de **prédiction de la trainability** : à partir d'un modèle vierge, des statistiques d'un dataset, et d'un environnement matériel, PRECOG cherche à prédire — **avant tout entraînement sur les données réelles** — une distribution de configurations d'apprentissage susceptibles de conduire à une convergence rapide, stable et efficace en données.
+**PRECOG** is a research system aiming to transform the classic hyperparameter optimization (HPO) problem into a **trainability prediction** problem: from an untrained model, dataset statistics, and a hardware environment, PRECOG seeks to predict — **before any training on real data** — a distribution of learning configurations likely to lead to fast, stable, and data-efficient convergence.
 
-PRECOG ne se substitue pas à l'entraînement final. Il précède et guide la recherche de configuration, en réduisant drastiquement le nombre d'entraînements complets nécessaires pour trouver une bonne configuration.
+PRECOG does not replace final training. It precedes and guides the configuration search, drastically reducing the number of full training runs needed to find a good configuration.
 
-L'énoncé central du projet est :
+The project's central statement is:
 
-> **PRECOG ne cherche pas les meilleurs hyperparamètres après avoir entraîné de nombreuses configurations ; il cherche à apprendre la relation entre l'état initial d'un modèle, les propriétés du problème et les conditions d'apprentissage, afin de prédire — avant tout entraînement réel — quelles configurations ont la plus forte probabilité de conduire à une convergence rapide et efficace.**
+> **PRECOG does not search for the best hyperparameters after training many configurations; it seeks to learn the relationship between a model's initial state, the properties of the problem, and the learning conditions, in order to predict — before any real training — which configurations have the highest probability of leading to fast, efficient convergence.**
 
-PRECOG est conçu comme une architecture hybride combinant six familles de méthodes complémentaires (zero-cost proxies, analyse d'expressivité de type NEAR, théorie de l'initialisation, meta-learning, optimisation bayésienne, validation courte adaptative), organisées en boucle fermée d'amélioration continue à partir d'un meta-dataset d'expériences.
+PRECOG is designed as a hybrid architecture combining six complementary families of methods (zero-cost proxies, NEAR-style expressivity analysis, initialization theory, meta-learning, Bayesian optimization, adaptive short validation), organized in a closed continuous-improvement loop built on a meta-dataset of experiments.
 
 ---
 
 ## 2. Motivation
 
-L'optimisation d'hyperparamètres classique (grid search, random search, Bayesian Optimization, Hyperband, PBT, etc.) procède essentiellement par **essai-erreur coûteux** : chaque configuration candidate doit être partiellement ou totalement entraînée pour être évaluée. Ce coût devient prohibitif à mesure que les modèles grossissent.
+Classic hyperparameter optimization (grid search, random search, Bayesian Optimization, Hyperband, PBT, etc.) essentially proceeds by **expensive trial and error**: every candidate configuration must be partially or fully trained to be evaluated. This cost becomes prohibitive as models grow.
 
-Une partie de la littérature récente (zero-cost proxies, NAS training-free, NEAR) montre qu'il est possible d'extraire des signaux informatifs sur la qualité potentielle d'une architecture ou d'une configuration **sans entraînement complet**, parfois à partir d'un seul mini-batch. Ces résultats restent cependant fragmentaires : aucun proxy n'est universellement dominant, la généralisation inter-domaines (vision → NLP → LLM) reste incertaine, et ces travaux se concentrent presque toujours sur le classement d'architectures plutôt que sur la prédiction complète d'une configuration d'apprentissage (learning rate, batch size, initialisation, scheduler, etc.).
+Part of the recent literature (zero-cost proxies, training-free NAS, NEAR) shows that it is possible to extract informative signals about the potential quality of an architecture or configuration **without full training**, sometimes from a single mini-batch. These results remain fragmentary, however: no proxy is universally dominant, cross-domain generalization (vision → NLP → LLM) remains uncertain, and this work almost always focuses on ranking architectures rather than fully predicting a learning configuration (learning rate, batch size, initialization, scheduler, etc.).
 
-PRECOG part de l'hypothèse que ces signaux, combinés entre eux et enrichis par l'expérience accumulée sur de nombreux entraînements passés (meta-learning), peuvent être exploités pour construire un **prédicteur de configuration**, et non uniquement un classement d'architectures.
+PRECOG starts from the hypothesis that these signals, combined with each other and enriched by experience accumulated across many past training runs (meta-learning), can be exploited to build a **configuration predictor**, not merely an architecture ranking.
 
 ---
 
-## 3. Problème scientifique
+## 3. Scientific Problem
 
-### 3.1 Formulation informelle
+### 3.1 Informal formulation
 
-> Étant donné un modèle vierge M, un dataset D (caractérisé uniquement par ses statistiques, sans entraînement dessus) et un environnement matériel H, peut-on prédire une configuration d'apprentissage θ (architecture fine, initialisation, optimiseur, learning rate, batch size, régularisation, scheduler) qui maximise la probabilité d'atteindre une performance cible, tout en minimisant le compute, le temps et la quantité de données nécessaires ?
+> Given an untrained model M, a dataset D (characterized only by its statistics, without training on it), and a hardware environment H, can we predict a learning configuration θ (fine-grained architecture, initialization, optimizer, learning rate, batch size, regularization, scheduler) that maximizes the probability of reaching a target performance, while minimizing the compute, time, and amount of data needed?
 
-### 3.2 Formulation mathématique
+### 3.2 Mathematical formulation
 
 $$
 \theta^* = \arg\max_{\theta} \; P\big(\text{Convergence} \geq \text{Target} \mid M, D, H, \theta\big)
 $$
 
-PRECOG cherche à approximer :
+PRECOG seeks to approximate:
 
 $$
 P(\theta^* \mid M, D, H)
 $$
 
-**sans mettre à jour les poids du modèle réel sur les données réelles** (voir §5 pour la définition stricte de « sans entraînement »).
+**without updating the real model's weights on real data** (see §5 for the strict definition of "without training").
 
-### 3.3 Ce que PRECOG n'est pas
+### 3.3 What PRECOG is not
 
-- Ce n'est **pas** un NAS (Neural Architecture Search) au sens strict : PRECOG peut proposer des ajustements d'architecture mais son cœur est la configuration d'apprentissage.
-- Ce n'est **pas** un simple wrapper autour d'un optimiseur bayésien (type Google Vizier) : Vizier/BO est un composant interne (le moteur de recherche), pas le système entier.
-- Ce n'est **pas** une garantie de performance : c'est un système probabiliste qui doit exprimer son incertitude.
-
----
-
-## 4. Hypothèses de recherche
-
-- **H1 (Signal pré-entraînement) :** l'état d'un réseau vierge (statistiques de gradient, Jacobien, activations, spectre, initialisation) contient de l'information exploitable sur sa future trainability.
-- **H2 (Non-universalité des proxies) :** aucun signal pris isolément n'est suffisant ; la combinaison de plusieurs familles de signaux est plus robuste que chacune séparément.
-- **H3 (Transférabilité par meta-learning) :** l'expérience accumulée sur des couples (modèle, dataset, configuration, résultat) passés améliore la prédiction sur des couples nouveaux, via une représentation de tâche partagée.
-- **H4 (Utilité du entraînement court) :** une validation très courte (quelques dizaines à quelques centaines de steps) réduit fortement l'incertitude sur les meilleures prédictions, à un coût marginal.
-- **H5 (Existence de régimes)** : les relations optimales entre hyperparamètres (ex. LR* = f(BatchSize)) dépendent du régime d'apprentissage (taille du modèle, bruit des données, architecture), et non d'une constante universelle.
-- **H6 (Corrélation ≠ causalité)** : certaines relations observées entre signaux pré-entraînement et performance finale sont confondues par des variables tierces (l'architecture, notamment) ; une partie doit être testée expérimentalement pour être exploitée avec confiance.
-
-Chacune de ces hypothèses doit être testée et potentiellement réfutée par les protocoles décrits en §14.
+- It is **not** a NAS (Neural Architecture Search) in the strict sense: PRECOG can suggest architecture adjustments, but its core is the learning configuration.
+- It is **not** a simple wrapper around a Bayesian optimizer (e.g. Google Vizier): Vizier/BO is an internal component (the search engine), not the whole system.
+- It is **not** a performance guarantee: it is a probabilistic system that must express its uncertainty.
 
 ---
 
-## 5. Définition opérationnelle de « sans entraînement » — les trois modes
+## 4. Research Hypotheses
 
-C'est la contrainte méthodologique la plus importante du projet : elle doit être non ambiguë.
+- **H1 (Pre-training signal):** the state of an untrained network (gradient, Jacobian, activation, spectrum, initialization statistics) contains exploitable information about its future trainability.
+- **H2 (Non-universality of proxies):** no single signal is sufficient on its own; combining several families of signals is more robust than any one alone.
+- **H3 (Transferability via meta-learning):** experience accumulated over past (model, dataset, configuration, result) tuples improves prediction on new tuples, via a shared task representation.
+- **H4 (Usefulness of short training):** a very short validation run (a few dozen to a few hundred steps) sharply reduces uncertainty on the best predictions, at marginal cost.
+- **H5 (Existence of regimes):** the optimal relationships between hyperparameters (e.g. LR* = f(BatchSize)) depend on the learning regime (model size, data noise, architecture), not on a universal constant.
+- **H6 (Correlation ≠ causation):** some observed relationships between pre-training signals and final performance are confounded by third variables (the architecture, in particular); some of these must be tested experimentally before being exploited with confidence.
 
-| Mode | Description | Mise à jour des poids du modèle réel | Usage |
+Each of these hypotheses must be tested and potentially refuted by the protocols described in §14.
+
+---
+
+## 5. Operational Definition of "Without Training" — the Three Modes
+
+This is the project's most important methodological constraint: it must be unambiguous.
+
+| Mode | Description | Real model weight update | Usage |
 |---|---|---:|---|
-| **PURE-PRECOG** | Analyse du modèle vierge et du dataset (statistiques, forward passes sans apprentissage, calculs zero-cost, Jacobien, etc.) | **ΔW = 0** | Mode de référence pour la promesse centrale du projet |
-| **PROBE** | Entraînement très court et contrôlé (ex. 50–1000 steps, 0.1–1 % du budget total) | ΔW ≠ 0, mais borné et journalisé | Validation/raffinement d'une prédiction PURE |
-| **FULL TRAINING** | Entraînement complet | ΔW ≠ 0, sans restriction | Génération de la vérité terrain (ground truth), jamais utilisé pour « tricher » sur la prédiction |
+| **PURE-PRECOG** | Analysis of the untrained model and the dataset (statistics, forward passes without learning, zero-cost computations, Jacobian, etc.) | **ΔW = 0** | Reference mode for the project's central promise |
+| **PROBE** | Very short, controlled training (e.g. 50–1000 steps, 0.1–1% of the total budget) | ΔW ≠ 0, but bounded and logged | Validation/refinement of a PURE prediction |
+| **FULL TRAINING** | Complete training | ΔW ≠ 0, unrestricted | Ground-truth generation, never used to "cheat" on the prediction |
 
-**Règle de contrat (Zero-Training Contract) :** tout benchmark revendiquant la promesse centrale de PRECOG (« prédire sans entraîner ») doit être réalisé exclusivement en mode **PURE**. Le mode **PROBE** est une extension explicitement mesurée séparément : on doit toujours pouvoir répondre à la question « combien PROBE apporte-t-il par rapport à PURE seul, pour quel coût additionnel ? ».
+**Contract rule (Zero-Training Contract):** any benchmark claiming PRECOG's central promise ("predict without training") must be carried out exclusively in **PURE** mode. **PROBE** mode is an explicitly, separately measured extension: it must always be possible to answer the question "how much does PROBE add over PURE alone, for what additional cost?".
 
-En mode PURE, les opérations autorisées sur le dataset sont limitées à des **statistiques descriptives** (taille, dimensionnalité, entropie approximée, déséquilibre de classes, redondance, bruit estimé) et, si nécessaire, à des **forward passes sans rétropropagation ni mise à jour des poids** (pour mesurer activations/Jacobien). Aucune boucle `optimizer.step()` n'est permise.
+In PURE mode, the operations allowed on the dataset are limited to **descriptive statistics** (size, dimensionality, approximate entropy, class imbalance, redundancy, estimated noise) and, if needed, to **forward passes without backpropagation or weight updates** (to measure activations/Jacobian). No `optimizer.step()` loop is permitted.
 
 ---
 
-## 6. Positionnement par rapport à l'état de l'art
+## 6. Positioning Relative to the State of the Art
 
-| Courant | Apport pour PRECOG | Limite reconnue |
+| Line of work | Contribution to PRECOG | Acknowledged limitation |
 |---|---|---|
-| Zero-Cost Proxies (NAS training-free) | Signaux rapides (SynFlow, SNIP, GraSP, Jacob-Cov…) à partir d'un mini-batch | Aucun proxy n'est dominant partout ; corrélations très variables selon domaine |
-| NEAR (effective rank des activations) | Signal d'expressivité training-free, utile pour choisir activation/initialisation | Signal seul, insuffisant pour prédire une configuration complète |
-| Théorie de l'initialisation / dynamical isometry | Cadre pour comprendre la propagation du signal et du gradient | Résultats surtout établis sur des cas simplifiés (réseaux linéaires profonds) |
-| Meta-learning pour HPO | Réutilisation d'expériences passées comme prior | Dépend fortement de la qualité et de la diversité du meta-dataset |
-| Bayesian Optimization, Hyperband, BOHB, PBT, ASHA, Vizier, Optuna | Moteurs de recherche efficaces sous budget | Partent en général d'un prior faible ou nul ; coût d'évaluation encore élevé sans signal pré-entraînement |
-| Freeze-thaw BO / prédiction de learning curves | Allocation progressive de ressources, arrêt anticipé | Nécessite déjà des observations partielles d'entraînement |
+| Zero-Cost Proxies (training-free NAS) | Fast signals (SynFlow, SNIP, GraSP, Jacob-Cov…) from a mini-batch | No proxy dominates everywhere; correlations vary widely by domain |
+| NEAR (effective rank of activations) | Training-free expressivity signal, useful for choosing activation/initialization | A single signal, insufficient to predict a full configuration |
+| Initialization theory / dynamical isometry | Framework for understanding signal and gradient propagation | Results mostly established on simplified cases (deep linear networks) |
+| Meta-learning for HPO | Reuse of past experiments as a prior | Strongly depends on the quality and diversity of the meta-dataset |
+| Bayesian Optimization, Hyperband, BOHB, PBT, ASHA, Vizier, Optuna | Efficient search engines under a budget | Generally start from a weak or null prior; evaluation cost still high without a pre-training signal |
+| Freeze-thaw BO / learning-curve prediction | Progressive resource allocation, early stopping | Already requires partial training observations |
 
-PRECOG se positionne comme une **couche de prédiction en amont** de ces moteurs de recherche : ceux-ci restent utilisés comme **bras d'exploration**, alimentés par un prior beaucoup plus informé.
-
----
-
-## 7. Principes fondamentaux
-
-1. **Observer avant de tester.** Toute information exploitable sans entraînement doit être exploitée avant de dépenser du compute.
-2. **Ne jamais dépendre d'un signal unique.** Chaque famille de signaux compense les faiblesses d'une autre (voir §9).
-3. **Prédire des distributions, pas des valeurs.** PRECOG retourne une région probable avec un niveau de confiance, jamais une valeur ponctuelle présentée comme certaine.
-4. **Apprendre des fonctions conditionnelles, pas des constantes.** Ex. LR* = f(Model, Dataset, Initialization, BatchSize, Optimizer), et non « LR = 0.001 ».
-5. **Économie mesurable.** PRECOG n'a de valeur que si son coût total (analyse + probes éventuels) reste largement inférieur au coût d'un HPO classique.
-6. **Apprendre de ses erreurs.** Chaque écart entre prédiction et vérité terrain est une donnée précieuse, conservée et exploitée, pas un résultat à ignorer.
-7. **Corrélation ≠ causalité.** Les relations exploitées en production doivent, autant que possible, être validées par des tests contrôlés.
-8. **Généralisation avant tout.** Un score élevé sur un benchmark déjà vu n'a pas de valeur scientifique tant qu'il n'est pas reproduit sur des tâches, architectures et datasets jamais rencontrés.
+PRECOG positions itself as an **upstream prediction layer** for these search engines: they remain used as **exploration arms**, fed by a far more informed prior.
 
 ---
 
-## 8. Architecture complète
+## 7. Fundamental Principles
+
+1. **Observe before testing.** Any information exploitable without training must be exploited before spending compute.
+2. **Never depend on a single signal.** Each family of signals compensates for another's weaknesses (see §9).
+3. **Predict distributions, not values.** PRECOG returns a probable region with a confidence level, never a point value presented as certain.
+4. **Learn conditional functions, not constants.** E.g. LR* = f(Model, Dataset, Initialization, BatchSize, Optimizer), not "LR = 0.001".
+5. **Measurable economy.** PRECOG only has value if its total cost (analysis + any probes) remains far below the cost of classic HPO.
+6. **Learn from its mistakes.** Every gap between prediction and ground truth is valuable data, kept and exploited, not a result to ignore.
+7. **Correlation ≠ causation.** Relationships exploited in production must, as much as possible, be validated by controlled tests.
+8. **Generalization above all.** A high score on an already-seen benchmark has no scientific value until it is reproduced on tasks, architectures, and datasets never encountered before.
+
+---
+
+## 8. Full Architecture
 
 ```text
                          PRECOG
@@ -151,10 +151,10 @@ PRECOG se positionne comme une **couche de prédiction en amont** de ces moteurs
                             │
                             ▼
                        META-PREDICTOR
-                     (ensemble multi-tête)
+                     (multi-head ensemble)
                       /              \
               Prediction         Uncertainty
-                (distribution)    (calibrée)
+                (distribution)    (calibrated)
                       \              /
                             ▼
                   HYPERPARAMETER DISTRIBUTION
@@ -162,19 +162,19 @@ PRECOG se positionne comme une **couche de prédiction en amont** de ces moteurs
               ┌─────────────┴─────────────┐
               ▼                           ▼
         Pareto Search                Search Engine
-       (multi-objectif)          (BO / Active Learning /
+       (multi-objective)          (BO / Active Learning /
                                     Diversity)
               └─────────────┬─────────────┘
                             ▼
                     ADAPTIVE SHORT-PROBE
-                     (mode PROBE, optionnel)
+                     (PROBE mode, optional)
                             │
                     ┌───────┴────────┐
                     ▼                ▼
-                REJETER          CONFIRMER
+                REJECT            CONFIRM
                     │                │
                     ▼                ▼
-              (retour boucle)   FULL TRAINING
+              (loop back)     FULL TRAINING
                                      │
                                      ▼
                                GROUND TRUTH
@@ -193,34 +193,34 @@ PRECOG se positionne comme une **couche de prédiction en amont** de ces moteurs
 
 ---
 
-## 9. Composants détaillés
+## 9. Detailed Components
 
 ### 9.1 Model Encoder
 
-Extrait un vecteur de descripteurs $X_{model}$ à partir de la seule architecture (sans données) : profondeur, largeur, nombre de paramètres, FLOPs, type d'activation, normalisation, ratio de connexions résiduelles, structure d'attention, mémoire requise.
+Extracts a descriptor vector $X_{model}$ from the architecture alone (no data): depth, width, number of parameters, FLOPs, activation type, normalization, residual-connection ratio, attention structure, required memory.
 
 ### 9.2 Data Encoder
 
-Extrait $X_{data}$ à partir de statistiques descriptives autorisées en mode PURE : taille, dimensionnalité, entropie, bruit estimé, déséquilibre de classes, corrélation de features, redondance, distribution. Objectif à terme : un embedding $Z_D = \text{Encoder}_{data}(D)$ permettant de comparer des datasets par similarité.
+Extracts $X_{data}$ from descriptive statistics allowed in PURE mode: size, dimensionality, entropy, estimated noise, class imbalance, feature correlation, redundancy, distribution. Long-term goal: an embedding $Z_D = \text{Encoder}_{data}(D)$ enabling datasets to be compared by similarity.
 
 ### 9.3 Hardware Encoder
 
-Capture GPU/CPU, mémoire, bande passante, précision numérique, capacité de batch, interconnexion — car la configuration optimale dépend aussi de l'environnement d'exécution : $\theta^* = f(M, D, H)$.
+Captures GPU/CPU, memory, bandwidth, numerical precision, batch capacity, interconnect — because the optimal configuration also depends on the execution environment: $\theta^* = f(M, D, H)$.
 
 ### 9.4 Trainability Engine
 
-Cœur analytique du système. Calcule, sans mise à jour des poids :
+The system's analytical core. Computes, without any weight update:
 
-- **Zero-Cost Proxies** : SynFlow, SNIP, GraSP, Jacob-Cov, statistiques de gradient et d'activation sur un ou quelques mini-batchs.
-- **NEAR** : rang effectif des activations avant/après non-linéarité, comme indicateur d'expressivité.
-- **Analyse d'initialisation** : variance des activations et des gradients, valeurs singulières du Jacobien $J = \partial f(x)/\partial x$, conditionnement $\kappa(J) = \sigma_{max}/\sigma_{min}$, lien avec la dynamical isometry.
-- **Courbure** (lorsque mesurable à faible coût) : approximations de la Hessienne locale.
+- **Zero-Cost Proxies**: SynFlow, SNIP, GraSP, Jacob-Cov, gradient and activation statistics on one or a few mini-batches.
+- **NEAR**: effective rank of activations before/after the nonlinearity, as an expressivity indicator.
+- **Initialization analysis**: variance of activations and gradients, singular values of the Jacobian $J = \partial f(x)/\partial x$, conditioning $\kappa(J) = \sigma_{max}/\sigma_{min}$, link to dynamical isometry.
+- **Curvature** (when measurable at low cost): local Hessian approximations.
 
-Règle de combinaison : $Score_{ZC} = f(S_1, S_2, ..., S_n)$, jamais un score isolé.
+Combination rule: $Score_{ZC} = f(S_1, S_2, ..., S_n)$, never a single isolated score.
 
 ### 9.5 Regime Detector
 
-Classifie le couple (modèle, dataset, hardware) dans un régime d'apprentissage (ex. petit modèle/données propres, grand modèle/données bruitées, faible quantité de données, séquences longues). Produit un **prior de régime** utilisé pour contraindre la distribution d'hyperparamètres prédite.
+Classifies the (model, dataset, hardware) tuple into a learning regime (e.g. small model/clean data, large model/noisy data, low data volume, long sequences). Produces a **regime prior** used to constrain the predicted hyperparameter distribution.
 
 ```text
 (Model, Dataset, Hardware) → Regime → Hyperparameter Prior
@@ -228,46 +228,46 @@ Classifie le couple (modèle, dataset, hardware) dans un régime d'apprentissage
 
 ### 9.6 Meta-Knowledge Base
 
-Base structurée de toutes les expériences passées (voir §12), avec un mécanisme de **task embedding** permettant de retrouver les expériences historiques les plus proches d'une nouvelle tâche, et d'utiliser ce voisinage comme prior de recherche (transfert d'expérience).
+A structured base of all past experiments (see §12), with a **task embedding** mechanism enabling retrieval of the historical experiments closest to a new task, and using that neighborhood as a search prior (experience transfer).
 
 ### 9.7 Meta-Predictor
 
-Modèle (ou ensemble de modèles) prenant en entrée :
+A model (or ensemble of models) taking as input:
 
 $$
 X = [X_{model}, X_{data}, X_{ZC}, X_{NEAR}, X_{init}, X_{regime}]
 $$
 
-et produisant, pour chaque configuration candidate, une prédiction multi-tête :
+and producing, for each candidate configuration, a multi-head prediction:
 
-- $\hat{A}$ : performance attendue
-- $\hat{T}$ : steps/temps de convergence
-- $\hat{C}$ : compute attendu
-- $\hat{N}$ : données nécessaires
-- une **incertitude** associée à chaque tête (ex. par ensembles, quantile regression, ou approches bayésiennes)
+- $\hat{A}$: expected performance
+- $\hat{T}$: convergence steps/time
+- $\hat{C}$: expected compute
+- $\hat{N}$: data needed
+- an **uncertainty** attached to each head (e.g. via ensembles, quantile regression, or Bayesian approaches)
 
-Le résultat n'est jamais une valeur unique mais une distribution, par exemple :
+The result is never a single value but a distribution, for example:
 
 ```text
 Learning rate
   recommended = 3.5e-4
   range       = [2e-4, 6e-4]
-  confidence  = 91 %
+  confidence  = 91%
 ```
 
 ### 9.8 Search Engine (BO + Active Learning + Diversity)
 
-Le meta-predictor fournit un **prior informé** ; le moteur de recherche explore ensuite l'espace restant. Fonction d'acquisition hybride :
+The meta-predictor provides an **informed prior**; the search engine then explores the remaining space. Hybrid acquisition function:
 
 $$
 Acquisition = \alpha \cdot \text{Expected Improvement} + \beta \cdot \text{Uncertainty} + \gamma \cdot \text{Diversity}
 $$
 
-Google Vizier / Optuna / BOHB jouent ici le rôle de **bras d'exploration**, pas de cerveau du système.
+Google Vizier / Optuna / BOHB play the role here of **exploration arms**, not the system's brain.
 
-### 9.9 Pareto Search (optimisation multi-objectifs)
+### 9.9 Pareto Search (multi-objective optimization)
 
-Plutôt que de chercher un optimum unique, PRECOG recherche un **front de Pareto** sur (performance, compute, données, temps, mémoire, énergie) :
+Rather than seeking a single optimum, PRECOG searches for a **Pareto front** over (performance, compute, data, time, memory, energy):
 
 ```text
                   Performance
@@ -278,26 +278,26 @@ Plutôt que de chercher un optimum unique, PRECOG recherche un **front de Pareto
                        ● C
                           \
                            ● D
-                       └──────────────► Coût
+                       └──────────────► Cost
 ```
 
-PRECOG peut alors retourner plusieurs configurations Pareto-optimales, à charge pour l'utilisateur (humain ou système) de choisir selon ses contraintes.
+PRECOG can then return several Pareto-optimal configurations, leaving it to the user (human or system) to choose according to their constraints.
 
-### 9.10 Adaptive Short-Probe (mode PROBE)
+### 9.10 Adaptive Short-Probe (PROBE mode)
 
-Budget d'entraînement court alloué **dynamiquement** selon l'incertitude et la performance intermédiaire :
+A short training budget allocated **dynamically** based on uncertainty and intermediate performance:
 
 ```text
-Candidate A → 50 steps → très mauvais → STOP
-Candidate B → 50 steps → prometteur   → 200 steps
+Candidate A → 50 steps → very poor    → STOP
+Candidate B → 50 steps → promising    → 200 steps
 Candidate C → 50 steps → excellent    → 1000 steps
 ```
 
-Formalisation : $Budget_i = f(Uncertainty_i, Performance_i)$. Ce mécanisme s'appuie sur la prédiction de learning curves (freeze-thaw) pour estimer une *time-to-target* et décider CONTINUER/ARRÊTER.
+Formalization: $Budget_i = f(Uncertainty_i, Performance_i)$. This mechanism relies on learning-curve prediction (freeze-thaw) to estimate a *time-to-target* and decide CONTINUE/STOP.
 
 ### 9.11 Decision Policy
 
-Politique explicite transformant PRECOG d'un simple prédicteur en agent d'optimisation expérimentale :
+An explicit policy turning PRECOG from a simple predictor into an experimental optimization agent:
 
 $$
 Policy(s_t) \rightarrow \{\text{TRAIN}, \text{STOP}, \text{EXPLORE}, \text{EXPLOIT}, \text{REQUEST MORE DATA}\}
@@ -305,15 +305,15 @@ $$
 
 ### 9.12 Causal Discovery Module
 
-Sépare corrélation et causalité par des expériences contrôlées : à architecture, dataset et optimiseur fixés, on fait varier une seule variable candidate (ex. la variance du gradient induite par l'initialisation) pour observer son effet isolé sur la convergence, plutôt que de conclure à partir d'une simple corrélation observationnelle.
+Separates correlation from causation through controlled experiments: with architecture, dataset, and optimizer fixed, a single candidate variable is varied (e.g. the gradient variance induced by initialization) to observe its isolated effect on convergence, rather than concluding from a simple observational correlation.
 
 ### 9.13 OOD / Distribution-Shift Detector
 
-Estime $P(\text{tâche connue})$. Si une nouvelle tâche est jugée éloignée du meta-dataset, PRECOG doit automatiquement augmenter le budget de validation (mode PROBE) plutôt que de faire une prédiction PURE surconfiante.
+Estimates $P(\text{known task})$. If a new task is judged far from the meta-dataset, PRECOG must automatically increase the validation budget (PROBE mode) rather than make an overconfident PURE prediction.
 
 ### 9.14 Failure Analysis Engine
 
-Catégorise chaque erreur de prédiction significative :
+Categorizes every significant prediction error:
 
 ```text
 DATA_SHIFT
@@ -324,11 +324,11 @@ PROXY_FAILURE
 PREDICTOR_FAILURE
 ```
 
-et alimente le cycle d'amélioration (meta-dataset → ré-entraînement du meta-predictor).
+and feeds the improvement cycle (meta-dataset → meta-predictor retraining).
 
 ### 9.15 Scientific Discovery Engine
 
-Objectif à plus long terme : transformer des corrélations observées en hypothèses, tester ces hypothèses par des expériences contrôlées (voir 9.12), et en déduire des principes généraux de trainability (ex. une relation candidate $LR^* \approx f(\text{BatchSize}, \text{GradientNoise}, \text{ModelScale})$ à vérifier expérimentalement).
+Longer-term goal: turn observed correlations into hypotheses, test those hypotheses through controlled experiments (see 9.12), and derive general principles of trainability from them (e.g. a candidate relationship $LR^* \approx f(\text{BatchSize}, \text{GradientNoise}, \text{ModelScale})$ to be experimentally verified).
 
 ```text
 Experiments → Patterns → Correlations → Hypotheses
@@ -337,31 +337,31 @@ Experiments → Patterns → Correlations → Hypotheses
 
 ---
 
-## 10. Variables et hyperparamètres
+## 10. Variables and Hyperparameters
 
-### 10.1 Hiérarchie des hyperparamètres cibles (du modèle entraîné)
+### 10.1 Hierarchy of target hyperparameters (of the trained model)
 
-| Niveau | Famille | Variables |
+| Level | Family | Variables |
 |---|---|---|
 | 1 | Architecture | depth, width, hidden dimension, number of heads, activation, normalization, residual connections |
-| 2 | Initialisation | Xavier, He, Orthogonal, variance/scale, bias init, LSUV |
-| 3 | Optimisation | optimizer (SGD, Momentum, Adam, AdamW, RMSProp, Lion), learning rate, batch size, gradient accumulation, momentum |
-| 4 | Scheduling | warmup, scheduler (cosine, linear, exponentiel, OneCycle), decay, LR minimum |
-| 5 | Régularisation | weight decay, dropout, label smoothing |
-| 6 | Données | sampling ratio, augmentation, curriculum, quantité de données |
+| 2 | Initialization | Xavier, He, Orthogonal, variance/scale, bias init, LSUV |
+| 3 | Optimization | optimizer (SGD, Momentum, Adam, AdamW, RMSProp, Lion), learning rate, batch size, gradient accumulation, momentum |
+| 4 | Scheduling | warmup, scheduler (cosine, linear, exponential, OneCycle), decay, minimum LR |
+| 5 | Regularization | weight decay, dropout, label smoothing |
+| 6 | Data | sampling ratio, augmentation, curriculum, amount of data |
 
-### 10.2 Hyperparamètres internes de PRECOG (à distinguer strictement des précédents)
+### 10.2 PRECOG's internal hyperparameters (strictly distinct from the above)
 
-| Composant | Hyperparamètres internes |
+| Component | Internal hyperparameters |
 |---|---|
-| Bayesian Optimization | fonction d'acquisition, coefficient exploration/exploitation, choix de noyau, observations initiales |
-| Short-Probe | nombre de steps initial, budget de probe, seuil d'arrêt anticipé, seuil de confiance |
-| Active Learning | coefficients d'exploration/incertitude/diversité |
-| Meta-learning | dimension des embeddings, taille de l'historique, taux d'apprentissage du meta-predictor |
+| Bayesian Optimization | acquisition function, exploration/exploitation coefficient, kernel choice, initial observations |
+| Short-Probe | initial number of steps, probe budget, early-stopping threshold, confidence threshold |
+| Active Learning | exploration/uncertainty/diversity coefficients |
+| Meta-learning | embedding dimension, history size, meta-predictor learning rate |
 
-### 10.3 Principe des fonctions conditionnelles
+### 10.3 Principle of conditional functions
 
-PRECOG n'apprend jamais une constante universelle mais des relations conditionnelles :
+PRECOG never learns a universal constant, only conditional relationships:
 
 $$
 LR^* = f(\text{Model}, \text{Dataset}, \text{Initialization}, \text{BatchSize}, \text{Optimizer})
@@ -376,61 +376,61 @@ $$
 \text{Optimizer}^* = f(\text{Model}, \text{Dataset}, \text{LR}, \text{BatchSize})
 $$
 
-et plus généralement une distribution jointe $P(\theta^* \mid M, D, H)$, avec un **graphe d'interactions** explicite entre variables (ex. LR ↔ BatchSize ↔ bruit du gradient ; Architecture ↔ Initialisation ↔ propagation du signal).
+and more generally a joint distribution $P(\theta^* \mid M, D, H)$, with an explicit **interaction graph** between variables (e.g. LR ↔ BatchSize ↔ gradient noise; Architecture ↔ Initialization ↔ signal propagation).
 
 ---
 
-## 11. Le concept central : la trainability
+## 11. The Central Concept: Trainability
 
-### 11.1 Définition opérationnelle
+### 11.1 Operational definition
 
 $$
 \text{Trainability} = f(\text{Gradient}, \text{Jacobian}, \text{Activation}, \text{Curvature}, \text{Conditioning}, \text{Initialization}, \text{Architecture}, \text{Data})
 $$
 
-### 11.2 Signaux exploitables
+### 11.2 Exploitable signals
 
-- Norme et distribution du gradient $\|\nabla_\theta L\|$
-- Variance du gradient $Var(\nabla_\theta L)$
-- Jacobien $J$, ses valeurs singulières $\sigma_1, ..., \sigma_n$
-- Conditionnement $\kappa(J) = \sigma_{max}/\sigma_{min}$
-- Statistiques d'activation $E[a], Var(a)$
-- Courbure locale $H = \nabla^2_\theta L$ (approximée, quand le coût le permet)
-- Propriétés d'initialisation et lien avec la dynamical isometry
+- Gradient norm and distribution $\|\nabla_\theta L\|$
+- Gradient variance $Var(\nabla_\theta L)$
+- Jacobian $J$, its singular values $\sigma_1, ..., \sigma_n$
+- Conditioning $\kappa(J) = \sigma_{max}/\sigma_{min}$
+- Activation statistics $E[a], Var(a)$
+- Local curvature $H = \nabla^2_\theta L$ (approximated, when cost allows)
+- Initialization properties and their link to dynamical isometry
 
-### 11.3 Question de recherche centrale
+### 11.3 Central research question
 
-> Quels signaux, observables sur un modèle vierge, prédisent réellement la vitesse et la qualité future de l'apprentissage — et lesquels ne sont que des artefacts corrélés à l'architecture ?
+> Which signals, observable on an untrained model, actually predict the future speed and quality of learning — and which are merely artifacts correlated with the architecture?
 
-Cette question doit être traitée à la fois de façon **prédictive** (le meta-predictor) et **causale** (le module de découverte causale, §9.12).
+This question must be addressed both **predictively** (the meta-predictor) and **causally** (the causal discovery module, §9.12).
 
 ---
 
-## 12. Le meta-dataset : mémoire scientifique de PRECOG
+## 12. The Meta-Dataset: PRECOG's Scientific Memory
 
-Chaque expérience — y compris chaque échec — doit être enregistrée avec, au minimum :
+Every experiment — including every failure — must be recorded with, at minimum:
 
 ```text
 Experiment
 ├── Model        (architecture, depth, width, params, FLOPs, activation, norm.)
-├── Dataset      (taille, dimension, entropie, bruit, déséquilibre, diversité)
-├── Hardware     (GPU/CPU, mémoire, précision, bande passante)
+├── Dataset      (size, dimension, entropy, noise, imbalance, diversity)
+├── Hardware     (GPU/CPU, memory, precision, bandwidth)
 ├── Initialization
 ├── Optimizer, LR, batch size, weight decay, scheduler, warmup
 ├── Zero-cost descriptors (SynFlow, SNIP, GraSP, Jacobian, NEAR…)
-├── Training dynamics (normes de gradient, pente de la loss, statistiques d'activation)
-├── Learning curve complète
-├── Steps, compute (GPU-hours), mémoire, temps, quantité de données, seed
-└── Ground truth (performance finale, convergence, coût réel)
+├── Training dynamics (gradient norms, loss slope, activation statistics)
+├── Full learning curve
+├── Steps, compute (GPU-hours), memory, time, amount of data, seed
+└── Ground truth (final performance, convergence, real cost)
 ```
 
-Les échecs de prédiction sont **conservés et étiquetés** (voir Failure Analysis, §9.14) : ils constituent un signal d'apprentissage au moins aussi précieux que les succès.
+Prediction failures are **kept and labeled** (see Failure Analysis, §9.14): they constitute a learning signal at least as valuable as successes.
 
-**Séparation stricte :** le meta-dataset est partitionné en TRAIN / VALIDATION / TEST, avec verrouillage explicite du TEST (jamais utilisé pour améliorer PRECOG), afin d'éviter le *benchmark overfitting*.
+**Strict separation:** the meta-dataset is partitioned into TRAIN / VALIDATION / TEST, with the TEST set explicitly locked (never used to improve PRECOG), to avoid *benchmark overfitting*.
 
 ---
 
-## 13. Transfert d'expérience et task embedding
+## 13. Experience Transfer and Task Embedding
 
 ```text
                  New Task
@@ -453,11 +453,11 @@ Les échecs de prédiction sont **conservés et étiquetés** (voir Failure Anal
               Optimization
 ```
 
-PRECOG doit pouvoir reconnaître qu'un nouveau problème « ressemble » à un problème déjà rencontré et exploiter cette similarité comme prior, plutôt que de repartir d'une recherche non informée — c'est l'un des principaux leviers attendus pour passer d'un système simplement analytique à un système réellement intelligent.
+PRECOG must be able to recognize that a new problem "resembles" a problem already encountered and exploit that similarity as a prior, rather than starting from an uninformed search — this is one of the main expected levers for moving from a merely analytical system to a genuinely intelligent one.
 
 ---
 
-## 14. Pipeline expérimental de bout en bout
+## 14. End-to-End Experimental Pipeline
 
 ```text
                     ┌──────────────────┐
@@ -465,7 +465,7 @@ PRECOG doit pouvoir reconnaître qu'un nouveau problème « ressemble » à un p
                     └────────┬─────────┘
                              ▼
                     ┌──────────────────┐
-                    │  PRECOG ANALYSIS │  (mode PURE)
+                    │  PRECOG ANALYSIS │  (PURE mode)
                     └────────┬─────────┘
                              ▼
                     ┌──────────────────┐
@@ -481,14 +481,14 @@ PRECOG doit pouvoir reconnaître qu'un nouveau problème « ressemble » à un p
                       TOP CANDIDATES
                              ▼
                     ┌──────────────────┐
-                    │ SHORT PROBES     │  (mode PROBE, optionnel)
+                    │ SHORT PROBES     │  (PROBE mode, optional)
                     └────────┬─────────┘
                      ┌───────┴────────┐
                      ▼                ▼
-                  PROMETTEUR        MAUVAIS
+                 PROMISING          POOR
                      │                │
                      ▼                ▼
-               FULL TRAINING     STOP / APPRENDRE
+               FULL TRAINING     STOP / LEARN
                      ▼
                  GROUND TRUTH
                      ▼
@@ -499,85 +499,85 @@ PRECOG doit pouvoir reconnaître qu'un nouveau problème « ressemble » à un p
                PRECOG v(n+1)
 ```
 
-Cette boucle ne s'arrête jamais après une seule itération : chaque génération de PRECOG doit être comparée à la précédente sur un protocole strictement identique.
+This loop never stops after a single iteration: every PRECOG generation must be compared to the previous one under a strictly identical protocol.
 
 ---
 
-## 15. Protocoles de test
+## 15. Test Protocols
 
-| Protocole | Question | Métrique principale |
+| Protocol | Question | Main metric |
 |---|---|---|
-| **P1 — Ranking** | PRECOG classe-t-il correctement les configurations ? | Spearman ρ, Kendall τ |
-| **P2 — Top-K** | Retrouve-t-il les meilleures configurations ? | Recall@K |
-| **P3 — Convergence** | La configuration retenue converge-t-elle plus vite ? | Steps/Time-to-Target |
-| **P4 — Compute** | Combien de calcul est économisé ? | GPU-hours / FLOPs |
-| **P5 — Data efficiency** | Même qualité avec moins de données ? | Samples-to-Target |
-| **P6 — Generalization** | Fonctionne-t-il sur un modèle/dataset jamais vu ? | Performance out-of-distribution |
+| **P1 — Ranking** | Does PRECOG rank configurations correctly? | Spearman ρ, Kendall τ |
+| **P2 — Top-K** | Does it retrieve the best configurations? | Recall@K |
+| **P3 — Convergence** | Does the chosen configuration converge faster? | Steps/Time-to-Target |
+| **P4 — Compute** | How much compute is saved? | GPU-hours / FLOPs |
+| **P5 — Data efficiency** | Same quality with less data? | Samples-to-Target |
+| **P6 — Generalization** | Does it work on a never-seen model/dataset? | Out-of-distribution performance |
 
-### 15.1 Séparation TRAIN/VALIDATION/TEST
+### 15.1 TRAIN/VALIDATION/TEST separation
 
 ```text
-PRECOG TRAIN        → datasets et architectures connus, historique d'expériences
-PRECOG VALIDATION   → datasets différents, architectures partiellement nouvelles
-PRECOG TEST (verrouillé) → jamais vus, jamais utilisés pour améliorer PRECOG
+PRECOG TRAIN        → known datasets and architectures, experiment history
+PRECOG VALIDATION   → different datasets, partially new architectures
+PRECOG TEST (locked) → never seen, never used to improve PRECOG
 ```
 
-### 15.2 Benchmarks de référence pour la phase initiale
+### 15.2 Reference benchmarks for the initial phase
 
-- **NAS-Bench-201** : espace de référence d'architectures avec performances pré-calculées (CIFAR-10, CIFAR-100, ImageNet16-120) — utile pour tester le ranking sans avoir à entraîner chaque architecture soi-même.
-- **HPOBench** : collection de problèmes de benchmark HPO, notamment multi-fidelity, pensée pour la reproductibilité.
-- **Laboratoire synthétique** (généré en interne) : datasets et modèles entièrement contrôlés (bruit, entropie, dimensionnalité, profondeur, largeur), permettant d'isoler des variables causales candidates avant de passer aux benchmarks réels.
+- **NATS-Bench** (successor to the now-deprecated NAS-Bench-201): a reference architecture space with pre-computed performance (CIFAR-10, CIFAR-100, ImageNet16-120) — useful for testing ranking without having to train every architecture oneself.
+- **NAS-Bench-Suite-Zero / JAHS-Bench / HPO-B**: actively maintained benchmarks, the first specifically designed to evaluate zero-cost proxies (see stack.md §4 for the rationale behind these choices over the now poorly-maintained HPOBench).
+- **Synthetic laboratory** (generated in-house): fully controlled datasets and models (noise, entropy, dimensionality, depth, width), enabling candidate causal variables to be isolated before moving to real benchmarks.
 
-### 15.3 Multi-seed et tests statistiques
+### 15.3 Multi-seed and statistical tests
 
-Chaque expérience importante est répétée sur plusieurs seeds, avec calcul de moyenne, écart-type et intervalle de confiance (95 % CI). Les comparaisons entre méthodes (PRECOG vs Random, vs BO, vs Hyperband, vs Vizier) utilisent des tests statistiques adaptés (ex. Wilcoxon signed-rank plutôt qu'un t-test lorsque les hypothèses paramétriques ne sont pas garanties), afin d'éviter de déclarer une supériorité sur la base d'un seed favorable.
+Every important experiment is repeated over several seeds, with mean, standard deviation, and confidence interval (95% CI) computed. Comparisons between methods (PRECOG vs. Random, vs. BO, vs. Hyperband, vs. Vizier) use appropriate statistical tests (e.g. a Wilcoxon signed-rank test rather than a t-test when parametric assumptions aren't guaranteed), to avoid declaring superiority based on a lucky seed.
 
 ---
 
-## 16. Métriques et objectifs (à démontrer, non garantis)
+## 16. Metrics and Objectives (to be demonstrated, not guaranteed)
 
-| Métrique | Définition | Cible expérimentale visée |
+| Metric | Definition | Experimental target |
 |---|---|---|
-| Ranking correlation | Spearman ρ / Kendall τ entre classement PRECOG et classement réel | ρ ≥ 0.80 puis ≥ 0.90 |
-| Top-K recall | $Recall@K = \|\text{PredictedTopK} \cap \text{TrueTopK}\| / K$ | Recall@10 ≥ 80 % puis ≥ 90 % |
-| Compute reduction | $1 - C_{PRECOG}/C_{baseline}$ | ≥ 50 % puis ≥ 70 % |
-| Performance retention | $Performance_{PRECOG}/Performance_{oracle}$ | ≥ 99 % (ou tolérance définie a priori) |
-| Data efficiency | $Samples_{baseline}/Samples_{PRECOG}$ pour performance cible égale | ≥ 30–50 % de réduction, à affiner |
-| Time/Steps-to-Target | Réduction du temps/nombre de steps pour atteindre une cible | ≥ 50 % de réduction |
-| Prediction error (learning curve) | $\lvert \text{Prediction} - \text{Actual} \rvert$ | ≈ 5–10 % selon la métrique |
-| Generalization | Recall@K sur tâches/architectures/datasets jamais vus | même ordre de grandeur que sur données connues |
+| Ranking correlation | Spearman ρ / Kendall τ between PRECOG's ranking and the real ranking | ρ ≥ 0.80 then ≥ 0.90 |
+| Top-K recall | $Recall@K = \|\text{PredictedTopK} \cap \text{TrueTopK}\| / K$ | Recall@10 ≥ 80% then ≥ 90% |
+| Compute reduction | $1 - C_{PRECOG}/C_{baseline}$ | ≥ 50% then ≥ 70% |
+| Performance retention | $Performance_{PRECOG}/Performance_{oracle}$ | ≥ 99% (or a tolerance defined a priori) |
+| Data efficiency | $Samples_{baseline}/Samples_{PRECOG}$ for equal target performance | ≥ 30–50% reduction, to be refined |
+| Time/Steps-to-Target | Reduction in time/number of steps to reach a target | ≥ 50% reduction |
+| Prediction error (learning curve) | $\lvert \text{Prediction} - \text{Actual} \rvert$ | ≈ 5–10% depending on the metric |
+| Generalization | Recall@K on never-seen tasks/architectures/datasets | same order of magnitude as on known data |
 
-Ces cibles sont **des hypothèses de progression**, formalisées en portes successives (§17), jamais présentées comme acquises avant démonstration.
+These targets are **progression hypotheses**, formalized as successive gates (§17), never presented as already achieved.
 
 ---
 
-## 17. Portes de progression (Gates)
+## 17. Progression Gates
 
 ```text
                 PRECOG
                    │
-             GATE 1 : ρ ≥ 0.70 ?
+             GATE 1: ρ ≥ 0.70 ?
                    │
-             GATE 2 : Recall@10 ≥ 80 % ?
+             GATE 2: Recall@10 ≥ 80% ?
                    │
-             GATE 3 : Compute reduction ≥ 50 % ?
+             GATE 3: Compute reduction ≥ 50% ?
                    │
-             GATE 4 : Generalization maintenue (données jamais vues) ?
+             GATE 4: Generalization maintained (never-seen data)?
                    │
-             GATE 5 : Recall@10 ≥ 90 % ?
+             GATE 5: Recall@10 ≥ 90% ?
                    │
-             GATE 6 : Compute reduction ≥ 70 % ?
+             GATE 6: Compute reduction ≥ 70% ?
                    │
-             PRECOG « niveau avancé »
+             PRECOG "advanced level"
 ```
 
-Chaque porte est validée par des métriques indépendantes, sur des jeux verrouillés, avant de considérer la génération suivante.
+Each gate is validated by independent metrics, on locked datasets, before considering the next generation.
 
 ---
 
-## 18. Baselines de comparaison
+## 18. Comparison Baselines
 
-PRECOG doit être systématiquement comparé, à budget égal, à :
+PRECOG must be systematically compared, at equal budget, against:
 
 ```text
 Random Search       Grid Search
@@ -585,136 +585,136 @@ Bayesian Optimization   Hyperband
 ASHA                 BOHB
 Population Based Training
 Google Vizier         Optuna
-Zero-Cost NAS (proxy seul)
-Meta-learning HPO (sans les couches additionnelles de PRECOG)
+Zero-Cost NAS (proxy alone)
+Meta-learning HPO (without PRECOG's additional layers)
 ```
 
-sur les axes : performance finale, compute, vitesse de convergence, données nécessaires, généralisation.
+along the axes: final performance, compute, convergence speed, data needed, generalization.
 
 ---
 
-## 19. Stratégie d'ablation
+## 19. Ablation Strategy
 
-### 19.1 Ablation des composants du pipeline
+### 19.1 Pipeline component ablation
 
 ```text
-PRECOG-A = Zero-Cost uniquement
+PRECOG-A = Zero-Cost only
 PRECOG-B = + NEAR
 PRECOG-C = + Initialization analysis
 PRECOG-D = + Meta-Learning
 PRECOG-E = + Bayesian Optimization
-PRECOG-F = + Short Probe adaptatif
+PRECOG-F = + Adaptive Short Probe
 PRECOG-G = + Active Learning / Uncertainty
 PRECOG-H = + Causal Discovery / OOD detection
 ```
 
-Exemple de tableau attendu (gabarit, non des résultats) :
+Expected table example (a template, not real results):
 
-| Système | Spearman | Recall@10 | Compute utilisé |
+| System | Spearman | Recall@10 | Compute used |
 |---|---:|---:|---:|
-| Random | 0.10 | 10 % | 100 % |
-| ZC | 0.60 | 55 % | 10 % |
-| ZC+NEAR | 0.68 | 64 % | 12 % |
-| +Init | 0.73 | 70 % | 14 % |
-| +Meta | 0.79 | 77 % | 16 % |
-| +BO | 0.82 | 82 % | 20 % |
-| +Probe adaptatif | 0.88 | 90 % | 30 % |
+| Random | 0.10 | 10% | 100% |
+| ZC | 0.60 | 55% | 10% |
+| ZC+NEAR | 0.68 | 64% | 12% |
+| +Init | 0.73 | 70% | 14% |
+| +Meta | 0.79 | 77% | 16% |
+| +BO | 0.82 | 82% | 20% |
+| +Adaptive Probe | 0.88 | 90% | 30% |
 
-### 19.2 Ablation des proxies individuels
+### 19.2 Individual proxy ablation
 
-SynFlow, SNIP, GraSP, Jacobian, NASWOT, Jacob-Cov, Gradient Norm, NEAR — testés individuellement puis en combinaison, car la littérature montre qu'aucun proxy n'est universellement dominant.
+SynFlow, SNIP, GraSP, Jacobian, NASWOT, Jacob-Cov, Gradient Norm, NEAR — tested individually then in combination, since the literature shows no proxy is universally dominant.
 
-### 19.3 Test de robustesse
+### 19.3 Robustness testing
 
-Perturbations volontaires : bruit et déséquilibre du dataset, distribution shift, profondeur/largeur du modèle, activation, seed, batch size, matériel — pour vérifier que les performances de PRECOG ne s'effondrent pas hors des conditions d'entraînement du meta-predictor.
+Deliberate perturbations: dataset noise and imbalance, distribution shift, model depth/width, activation, seed, batch size, hardware — to verify that PRECOG's performance doesn't collapse outside the meta-predictor's training conditions.
 
 ---
 
-## 20. Gestion de l'incertitude
+## 20. Uncertainty Management
 
-PRECOG doit systématiquement produire, en plus d'une prédiction :
+In addition to a prediction, PRECOG must systematically produce:
 
-- une **incertitude calibrée** (par ensembles de prédicteurs, quantile regression, ou méthode bayésienne),
-- une distinction entre **incertitude du modèle** (manque de connaissance), **incertitude des données** (ambiguïté intrinsèque du problème) et **stochasticité de l'entraînement** (variance entre seeds).
+- a **calibrated uncertainty** (via predictor ensembles, quantile regression, or a Bayesian method),
+- a distinction between **model uncertainty** (lack of knowledge), **data uncertainty** (intrinsic ambiguity of the problem), and **training stochasticity** (variance across seeds).
 
-Exemple de sortie :
+Example output:
 
 ```text
-Configuration A : prédiction = 95 %, confiance = 91 %
-Configuration B : prédiction = 94 %, confiance = 52 %
+Configuration A: prediction = 95%, confidence = 91%
+Configuration B: prediction = 94%, confidence = 52%
 ```
 
-L'incertitude alimente directement la fonction d'acquisition (§9.8) et la politique de décision (§9.11) : une configuration incertaine mais potentiellement informative peut être testée en priorité pour réduire l'incertitude globale du système (active learning).
+Uncertainty directly feeds the acquisition function (§9.8) and the decision policy (§9.11): an uncertain but potentially informative configuration can be tested with priority to reduce the system's overall uncertainty (active learning).
 
 ---
 
-## 21. Causalité vs corrélation
+## 21. Causation vs. Correlation
 
-Une corrélation observée entre un signal pré-entraînement (ex. variance du gradient) et la performance finale peut être confondue par une variable tierce (l'architecture, typiquement). PRECOG doit donc :
+A correlation observed between a pre-training signal (e.g. gradient variance) and final performance can be confounded by a third variable (typically the architecture). PRECOG must therefore:
 
-1. Identifier les relations candidates à partir des corrélations du meta-dataset.
-2. Formuler des hypothèses explicites.
-3. Concevoir des expériences contrôlées où seule la variable candidate change (architecture, dataset et optimiseur fixés).
-4. Ne promouvoir une relation au rang de « connaissance exploitable en production » qu'après validation causale, ou à défaut la marquer explicitement comme « corrélation non validée causalement ».
-
----
-
-## 22. Généralisation et détection de distribution-shift
-
-Le test de généralisation (P6, §15) est considéré comme **le plus important scientifiquement**. Il exige de :
-
-- entraîner/valider le meta-predictor sur un sous-ensemble d'architectures et de datasets, puis
-- tester sur des architectures et datasets **structurellement absents** de l'ensemble d'entraînement (ex. entraîner sur CNN/MLP/ResNet, tester sur Transformer).
-
-Le module OOD (§9.13) doit estimer $P(\text{tâche connue})$ et déclencher automatiquement une augmentation du budget de validation (mode PROBE) lorsque la tâche est jugée éloignée du meta-dataset, plutôt que de produire une prédiction PURE trop confiante hors distribution.
+1. Identify candidate relationships from the meta-dataset's correlations.
+2. Formulate explicit hypotheses.
+3. Design controlled experiments where only the candidate variable changes (architecture, dataset, and optimizer fixed).
+4. Only promote a relationship to "knowledge exploitable in production" after causal validation, or otherwise explicitly mark it as "correlation not causally validated".
 
 ---
 
-## 23. Risques méthodologiques et mitigations
+## 22. Generalization and Distribution-Shift Detection
 
-| Risque | Description | Mitigation |
+The generalization test (P6, §15) is considered **the most scientifically important**. It requires:
+
+- training/validating the meta-predictor on a subset of architectures and datasets, then
+- testing on architectures and datasets **structurally absent** from the training set (e.g. train on CNN/MLP/ResNet, test on Transformer).
+
+The OOD module (§9.13) must estimate $P(\text{known task})$ and automatically trigger an increase in the validation budget (PROBE mode) when a task is judged far from the meta-dataset, rather than producing an overconfident PURE prediction out of distribution.
+
+---
+
+## 23. Methodological Risks and Mitigations
+
+| Risk | Description | Mitigation |
 |---|---|---|
-| Data leakage | Information du dataset réel s'infiltrant dans l'analyse PURE | Contrat Zero-Training strict (§5), audit des features autorisées |
-| Benchmark overfitting | PRECOG optimisé en boucle sur les mêmes benchmarks (NAS-Bench-201, HPOBench…) | Jeu de TEST verrouillé, non révélé avant évaluation finale |
-| Biais du meta-dataset | Sur-représentation de certaines architectures/domaines | Curriculum de diversification, suivi explicite de la couverture du meta-dataset |
-| Distribution shift non détecté | Application de PRECOG hors de son domaine de validité sans avertissement | Module OOD (§9.13) + budget de validation adaptatif |
-| Stochasticité des entraînements | Confondre variance de seed et effet réel d'une configuration | Multi-seed obligatoire, intervalles de confiance (§15.3) |
-| Incertitude mal calibrée | Confiance affichée ne reflétant pas l'erreur réelle | Calibration régulière, tests de calibration (ex. reliability diagrams) |
-| Coût excessif de PRECOG lui-même | Le coût d'analyse dépasse l'économie réalisée | Mesure systématique de $Cost_{PRECOG} + Cost_{PROBE}$ vs $Cost_{HPO\ classique}$ (§24) |
-| Corrélation trompeuse | Relation exploitée en production non causale | Module de découverte causale (§21) |
-| Dépendance à une famille d'architectures | Bonne performance uniquement sur les architectures du meta-dataset | Curriculum progressif (MLP → CNN → Transformer → inconnu), tests de généralisation stricts |
+| Data leakage | Real dataset information leaking into the PURE analysis | Strict Zero-Training Contract (§5), audit of allowed features |
+| Benchmark overfitting | PRECOG optimized in a loop on the same benchmarks (NAS-Bench-201, HPOBench…) | Locked TEST set, not revealed before final evaluation |
+| Meta-dataset bias | Over-representation of certain architectures/domains | Diversification curriculum, explicit tracking of meta-dataset coverage |
+| Undetected distribution shift | PRECOG applied outside its domain of validity without warning | OOD module (§9.13) + adaptive validation budget |
+| Training stochasticity | Confusing seed variance with a configuration's real effect | Mandatory multi-seed runs, confidence intervals (§15.3) |
+| Poorly calibrated uncertainty | Displayed confidence not reflecting the real error | Regular calibration, calibration tests (e.g. reliability diagrams) |
+| PRECOG's own excessive cost | Analysis cost exceeds the savings achieved | Systematic measurement of $Cost_{PRECOG} + Cost_{PROBE}$ vs. $Cost_{classic\ HPO}$ (§24) |
+| Misleading correlation | A relationship exploited in production isn't causal | Causal discovery module (§21) |
+| Dependence on one architecture family | Good performance only on the meta-dataset's architectures | Progressive curriculum (MLP → CNN → Transformer → unknown), strict generalization tests |
 
 ---
 
-## 24. Économie du système
+## 24. System Economics
 
-PRECOG n'a de valeur pratique que si :
+PRECOG only has practical value if:
 
 $$
-Cost_{PRECOG} + Cost_{PROBE\ éventuel} \; \ll \; Cost_{HPO\ classique\ ou\ multiples\ FULL\ TRAINING}
+Cost_{PRECOG} + Cost_{PROBE\ if\ any} \; \ll \; Cost_{classic\ HPO\ or\ multiple\ FULL\ TRAININGs}
 $$
 
-Cette contrainte doit être mesurée à chaque évaluation, pas seulement supposée. Un système théoriquement précis mais dont l'inférence est trop coûteuse (par exemple un meta-predictor nécessitant lui-même énormément de calcul) doit être considéré comme un échec économique, même en cas de bon score de ranking.
+This constraint must be measured at every evaluation, not merely assumed. A system that is theoretically accurate but whose inference is too costly (e.g. a meta-predictor that itself requires enormous compute) must be considered an economic failure, even with a good ranking score.
 
 ---
 
-## 25. Roadmap de développement
+## 25. Development Roadmap
 
 ```text
-V1 — Fondations
+V1 — Foundations
   Learning Rate, Batch Size, Optimizer, Initialization
-  (analyse zero-cost de base, sans meta-learning)
+  (basic zero-cost analysis, no meta-learning)
 
-V2 — Configuration complète
+V2 — Full configuration
   Weight Decay, Warmup, Scheduler, Gradient Accumulation
 
 V3 — Architecture
   Dropout, Architecture (depth/width/activation/normalization)
 
 V4 — Intelligence
-  Meta-learning, Task Embeddings, NEAR, Zero-Cost combinés
+  Meta-learning, Task Embeddings, NEAR, combined Zero-Cost proxies
 
-V5 — Recherche adaptative
+V5 — Adaptive search
   Active Learning, Bayesian Optimization, Adaptive Short-Probe
 
 V6 — Science
@@ -722,98 +722,98 @@ V6 — Science
   Scientific Discovery Engine
 ```
 
-### Progression scientifique par phase (indicative)
+### Scientific progression by phase (indicative)
 
 ```text
-Phase A : fondations analytiques (Zero-Cost, NEAR, Initialization)
-Phase B : meta-learning + Bayesian Optimization
-Phase C : incertitude + active learning + acquisition adaptative
-Phase D : prédiction de learning curves + probe adaptatif + failure analysis
-Phase E : validation — tâches jamais vues, multi-seed, tests statistiques, reproductibilité
+Phase A: analytical foundations (Zero-Cost, NEAR, Initialization)
+Phase B: meta-learning + Bayesian Optimization
+Phase C: uncertainty + active learning + adaptive acquisition
+Phase D: learning-curve prediction + adaptive probe + failure analysis
+Phase E: validation — never-seen tasks, multi-seed, statistical tests, reproducibility
 ```
 
-### Curriculum expérimental
+### Experimental curriculum
 
 ```text
-Niveau 1 : MLP sur datasets synthétiques
-Niveau 2 : CNN sur vision
-Niveau 3 : ResNet / architectures modernes
-Niveau 4 : Transformers
-Niveau 5 : fine-tuning de LLM
-Niveau 6 : modèles et datasets jamais vus (test de généralisation ultime)
+Level 1: MLP on synthetic datasets
+Level 2: CNN on vision
+Level 3: ResNet / modern architectures
+Level 4: Transformers
+Level 5: LLM fine-tuning
+Level 6: never-seen models and datasets (ultimate generalization test)
 ```
 
 ---
 
-## 26. Critères de réussite
+## 26. Success Criteria
 
-Un jalon de PRECOG n'est considéré atteint que si **simultanément**, sur un jeu de test verrouillé et jamais utilisé pour l'entraînement :
+A PRECOG milestone is only considered reached if, **simultaneously**, on a locked test set never used for training:
 
-1. le ranking (Spearman ρ) atteint le seuil visé pour le niveau considéré,
-2. le Recall@K atteint le seuil visé,
-3. la réduction de compute mesurée atteint le seuil visé,
-4. la performance finale retenue reste dans la tolérance de perte définie a priori,
-5. les résultats se maintiennent sur des tâches/architectures/datasets jamais vus (généralisation),
-6. les résultats sont reproductibles (multi-seed, intervalles de confiance, environnement documenté).
+1. the ranking (Spearman ρ) reaches the target threshold for the level considered,
+2. Recall@K reaches the target threshold,
+3. the measured compute reduction reaches the target threshold,
+4. the retained final performance stays within the tolerance for loss defined a priori,
+5. results hold on never-seen tasks/architectures/datasets (generalization),
+6. results are reproducible (multi-seed, confidence intervals, documented environment).
 
-Un système qui n'atteint qu'une partie de ces critères (ex. bon ranking mais mauvaise généralisation) n'est **pas** considéré comme ayant atteint le jalon.
-
----
-
-## 27. Limites connues
-
-- La généralisation à des familles d'architectures radicalement nouvelles (au-delà de celles représentées dans le meta-dataset) n'est pas garantie et doit être traitée comme une hypothèse à tester, pas comme acquise.
-- Les signaux zero-cost actuels de la littérature ne sont pas universellement fiables ; leur combinaison réduit le risque mais ne l'élimine pas.
-- La qualité du meta-dataset borne intrinsèquement la qualité du meta-predictor : un meta-dataset peu diversifié produira des prédictions optimistes hors de sa couverture réelle.
-- Le mode PROBE introduit un coût réel, même minime ; toute revendication de gain doit être nette de ce coût.
-- La distinction causalité/corrélation reste partielle : certaines relations exploitées resteront, en pratique, des corrélations robustes plutôt que des causes démontrées, et doivent être présentées comme telles.
+A system that reaches only part of these criteria (e.g. good ranking but poor generalization) is **not** considered to have reached the milestone.
 
 ---
 
-## 28. Perspectives
+## 27. Known Limitations
 
-À plus long terme, l'ambition scientifique de PRECOG dépasse l'HPO : il s'agit de construire une théorie opérationnelle de la **dynamique d'apprentissage prédictible**, c'est-à-dire une fonction
+- Generalization to radically new architecture families (beyond those represented in the meta-dataset) is not guaranteed and must be treated as a hypothesis to test, not as a given.
+- Current zero-cost signals from the literature are not universally reliable; combining them reduces but does not eliminate the risk.
+- The meta-dataset's quality intrinsically bounds the meta-predictor's quality: a poorly diversified meta-dataset will produce overly optimistic predictions outside its real coverage.
+- PROBE mode introduces a real cost, even if minimal; any claimed gain must be net of this cost.
+- The causation/correlation distinction remains partial: some exploited relationships will in practice remain robust correlations rather than demonstrated causes, and must be presented as such.
+
+---
+
+## 28. Outlook
+
+In the longer term, PRECOG's scientific ambition goes beyond HPO: the goal is to build an operational theory of **predictable learning dynamics**, i.e. a function
 
 $$
 F : (\text{Model}, \text{Data}, \text{Initialization}, \text{Hyperparameters}) \rightarrow \text{Training trajectory}
 $$
 
-capable d'anticiper la trajectoire de la loss $L(t)$ avant l'entraînement complet. Si cette direction aboutit, PRECOG cesserait d'être uniquement un optimiseur d'hyperparamètres pour devenir un **modèle prédictif de la dynamique d'apprentissage**, avec un potentiel de contribution scientifique propre (au-delà de l'intégration d'outils existants).
+able to anticipate the loss trajectory $L(t)$ before full training. If this direction succeeds, PRECOG would stop being just a hyperparameter optimizer and become a **predictive model of learning dynamics**, with potential for its own scientific contribution (beyond integrating existing tools).
 
 ---
 
-## 29. Architecture de production (cible à terme)
+## 29. Production Architecture (long-term target)
 
-PRECOG, en tant que plateforme, doit pouvoir :
+PRECOG, as a platform, must be able to:
 
-1. Recevoir un modèle vierge, les métadonnées/statistiques autorisées du dataset, et une description de l'environnement matériel.
-2. Exécuter une analyse en mode **PURE** (aucune mise à jour de poids sur données réelles).
-3. Produire une **distribution d'hyperparamètres** avec justification et niveau de confiance, ainsi qu'un **ensemble Pareto-optimal** de configurations selon les contraintes (performance/compute/données/temps).
-4. Sur demande, valider les meilleures hypothèses via un budget minimal en mode **PROBE**.
-5. Journaliser systématiquement l'expérience (y compris en cas d'usage en production) dans le meta-dataset, pour amélioration continue.
+1. Receive an untrained model, the dataset's allowed metadata/statistics, and a description of the hardware environment.
+2. Run an analysis in **PURE** mode (no weight update on real data).
+3. Produce a **hyperparameter distribution** with justification and confidence level, as well as a **Pareto-optimal set** of configurations according to constraints (performance/compute/data/time).
+4. On request, validate the best hypotheses via a minimal budget in **PROBE** mode.
+5. Systematically log the experiment (including production usage) into the meta-dataset, for continuous improvement.
 
 ```text
-Modèle vierge + Dataset (stats) + Hardware
+Untrained model + Dataset (stats) + Hardware
                     │
                     ▼
-              PRECOG (mode PURE)
+              PRECOG (PURE mode)
                     │
                     ▼
-     Distribution d'hyperparamètres + confiance
+     Hyperparameter distribution + confidence
                     │
                     ▼
-        Ensemble Pareto-optimal de configurations
+        Pareto-optimal set of configurations
                     │
-             (optionnel) PROBE
+             (optional) PROBE
                     │
                     ▼
-        Configuration recommandée + justification
+        Recommended configuration + justification
 ```
 
 ---
 
-## 30. Synthèse — l'idée qui distingue PRECOG d'un HPO classique
+## 30. Synthesis — the idea that distinguishes PRECOG from classic HPO
 
-> **PRECOG ne cherche pas simplement les meilleurs hyperparamètres après avoir entraîné de nombreuses configurations ; il cherche à apprendre la relation entre l'état initial d'un modèle, les propriétés du problème et les conditions d'apprentissage, afin de prédire — avant tout entraînement sur les données réelles — quelles configurations ont la plus forte probabilité de conduire à une convergence rapide et efficace.**
+> **PRECOG does not simply search for the best hyperparameters after training many configurations; it seeks to learn the relationship between a model's initial state, the properties of the problem, and the learning conditions, in order to predict — before any training on real data — which configurations have the highest probability of leading to fast, efficient convergence.**
 
-Toute évaluation, tout benchmark et toute communication scientifique autour de PRECOG doivent revenir à ce test : le système apporte-t-il une information exploitable **avant** l'entraînement, mesurable, généralisable, et économiquement justifiée — ou se contente-t-il de reproduire un HPO classique habillé différemment ?
+Every evaluation, every benchmark, and every scientific communication about PRECOG must come back to this test: does the system provide information exploitable **before** training, that is measurable, generalizable, and economically justified — or does it merely reproduce classic HPO dressed up differently?

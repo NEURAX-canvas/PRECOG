@@ -1,13 +1,13 @@
 # PreTrainOpt
-## Document fondateur — Recherche, Architecture Technique & Stratégie Produit
+## Founding Document — Research, Technical Architecture & Product Strategy
 
-**Sous-titre :** *Prédire, avant l'entraînement, les conditions qui font converger un modèle plus vite, avec moins de données et moins de calcul.*
+**Subtitle:** *Predicting, before training, the conditions that make a model converge faster, with less data and less compute.*
 
-**Statut :** document de travail — hypothèses de recherche non validées, à tester expérimentalement.
+**Status:** working document — research hypotheses not yet validated, to be tested experimentally.
 
 ---
 
-## Table des matières
+## Table of Contents
 
 1. Executive Summary
 2. Problem Statement
@@ -16,7 +16,7 @@
 5. Hypotheses
 6. State of the Art
 7. Existing Projects
-8. Google Vizier — Analyse
+8. Google Vizier — Analysis
 9. Theoretical Foundations
 10. Training Dynamics
 11. Hyperparameter Taxonomy
@@ -45,409 +45,410 @@
 34. Failure Modes
 35. Research Risks
 36. Open Research Questions
-37. Roadmap
-38. MVP
-39. Future Extensions
-40. Potential Scientific Contributions
-41. Potential Industrial Applications
-42. Open-source Strategy
-43. Product Strategy
-44. Final Research Thesis
+37. Scientific Positioning
+38. Roadmap
+39. MVP
+40. Future Extensions
+41. Potential Scientific Contributions
+42. Potential Industrial Applications
+43. Open-source Strategy
+44. Product Strategy
+45. Final Research Thesis
 
-Annexe A — Identité du projet (noms, tagline, mission)
-Annexe B — Recommandation finale (prototype, expériences prioritaires, 3 hypothèses à tester en premier)
+Appendix A — Project Identity (names, tagline, mission)
+Appendix B — Final Recommendation (prototype, priority experiments, 3 hypotheses to test first)
 
 ---
 
 ## 1. Executive Summary
 
-L'entraînement d'un réseau de neurones est aujourd'hui piloté par un cycle **essai-erreur** : on choisit une configuration (learning rate, optimizer, batch size, initialisation…), on entraîne, on observe la loss, on ajuste. Des outils comme **Google Vizier**, **Optuna** ou **Hyperband** automatisent ce cycle, mais ne changent pas sa nature : ils restent des boucles *configuration → entraînement → métrique → nouvelle configuration*, où chaque itération coûte un entraînement (complet ou partiel).
+Training a neural network today is driven by a **trial-and-error** cycle: pick a configuration (learning rate, optimizer, batch size, initialization…), train, observe the loss, adjust. Tools like **Google Vizier**, **Optuna**, or **Hyperband** automate this cycle, but don't change its nature: they remain *configuration → training → metric → new configuration* loops, where every iteration costs a training run (full or partial).
 
-**PreTrainOpt** part d'une question différente :
+**PreTrainOpt** starts from a different question:
 
-> Peut-on, à partir de propriétés observables **avant** ou avec un minimum d'entraînement réel (architecture du modèle, statistiques de la tâche, géométrie locale de la loss autour de l'initialisation), **prédire** une configuration d'entraînement qui converge plus vite, avec moins de données et moins de calcul — plutôt que de la *découvrir* par essais successifs ?
+> Can we, from properties observable **before** training or with a minimal amount of real training (model architecture, task statistics, local loss geometry around initialization), **predict** a training configuration that converges faster, with less data and less compute — rather than *discovering* it through successive trials?
 
-Ce document :
+This document:
 
-- pose la question de recherche et la décompose en sous-questions testables ;
-- distingue explicitement ce qui est **établi**, ce qui est **plausible mais non démontré**, et ce qui constitue **notre hypothèse propre** ;
-- propose une méthodologie expérimentale causale (pas seulement corrélationnelle) fondée sur un **laboratoire de tâches synthétiques** ;
-- définit une architecture logicielle (Rust + Python) permettant de construire ce laboratoire, d'y faire tourner des milliers d'expériences contrôlées, et d'en extraire un **meta-modèle prédictif** ;
-- propose une roadmap en 8 versions, du prototype MLP jusqu'à une API de production ;
-- conclut par une recommandation concrète sur le premier prototype à construire.
+- poses the research question and breaks it down into testable sub-questions;
+- explicitly distinguishes what is **established**, what is **plausible but unproven**, and what constitutes **our own hypothesis**;
+- proposes a causal (not merely correlational) experimental methodology grounded in a **synthetic task laboratory**;
+- defines a software architecture (Rust + Python) to build this laboratory, run thousands of controlled experiments on it, and extract a **predictive meta-model**;
+- proposes an 8-version roadmap, from an MLP prototype to a production API;
+- concludes with a concrete recommendation for the first prototype to build.
 
-Le projet est délibérément conçu pour **pouvoir échouer proprement** : si l'hypothèse centrale ne tient pas (les propriétés pré-entraînement ne suffisent pas à prédire la dynamique d'apprentissage), le laboratoire synthétique et l'*experiment database* construits en chemin restent des contributions utiles en elles-mêmes (étude empirique de la training dynamics, benchmark de baselines HPO, etc.).
+The project is deliberately designed to be able to **fail cleanly**: if the central hypothesis doesn't hold (pre-training properties are insufficient to predict learning dynamics), the synthetic laboratory and *experiment database* built along the way remain useful contributions in their own right (empirical study of training dynamics, HPO baseline benchmark, etc.).
 
 ---
 
 ## 2. Problem Statement
 
-**Constat.** Le coût d'entraînement d'un modèle dépend fortement d'un ensemble de décisions prises *avant* le premier pas de gradient : initialisation, learning rate, optimizer, batch size, architecture, schedule. Ces décisions sont aujourd'hui choisies par :
+**Observation.** The cost of training a model heavily depends on a set of decisions made *before* the first gradient step: initialization, learning rate, optimizer, batch size, architecture, schedule. These decisions are currently chosen by:
 
-- des heuristiques héritées de la littérature (ex. He init pour ReLU, LR ≈ 3e-4 pour Adam) ;
-- des recherches automatiques coûteuses (grid/random search, Bayesian optimization, Vizier) qui nécessitent de nombreux entraînements complets ou partiels ;
-- de l'intuition d'ingénieur, difficile à transférer et à reproduire.
+- heuristics inherited from the literature (e.g. He init for ReLU, LR ≈ 3e-4 for Adam);
+- expensive automated searches (grid/random search, Bayesian optimization, Vizier) requiring many full or partial training runs;
+- engineering intuition, hard to transfer and reproduce.
 
-**Problème.** Il n'existe pas aujourd'hui de système qui, à partir de la seule description d'un modèle et d'une tâche (avant tout entraînement significatif), **prédit** une configuration proche de l'optimum — au lieu de la *rechercher* par essais.
+**Problem.** There is currently no system that, from the sole description of a model and a task (before any significant training), **predicts** a near-optimal configuration — instead of *searching* for it by trial.
 
-**Formulation.** On cherche à remplacer, ou au minimum à amorcer intelligemment, la boucle classique :
+**Formulation.** We seek to replace, or at least intelligently seed, the classic loop:
 
 $$
 H \rightarrow \mathrm{Train}(H) \rightarrow \mathrm{Performance}
 $$
 
-par une fonction de prédiction :
+with a prediction function:
 
 $$
 X_{model}, X_{task}, X_{data} \;\longrightarrow\; \widehat{H^*}
 $$
 
-où \(\widehat{H^*}\) est une configuration d'entraînement (initialisation, LR, optimizer, batch, schedule, etc.) obtenue **sans** — ou avec un budget d'entraînement très inférieur à — une recherche d'hyperparamètres classique.
+where \(\widehat{H^*}\) is a training configuration (initialization, LR, optimizer, batch, schedule, etc.) obtained **without** — or with a training budget far below — a classic hyperparameter search.
 
-**Ce que ce projet n'est pas.** Ce n'est pas un *hyperparameter tuner* de plus. Un tuner cherche ; nous voulons **prédire**, quitte à corriger ensuite avec un budget d'entraînement minimal (« few-step probing », voir §15).
+**What this project is not.** It is not one more *hyperparameter tuner*. A tuner *searches*; we want to **predict**, possibly correcting afterward with a minimal training budget ("few-step probing", see §15).
 
 ---
 
 ## 3. Scientific Motivation
 
-Trois observations motivent le projet :
+Three observations motivate the project:
 
-1. **Le transfer learning fonctionne.** Un modèle pré-entraîné apprend une nouvelle tâche avec infiniment moins de données qu'un modèle vierge, parce qu'il part d'une meilleure région de l'espace des paramètres. Cela prouve que *le point de départ* compte autant que l'algorithme d'optimisation.
-2. **La géométrie locale de la loss est calculable sans entraînement complet.** Le gradient et des approximations de la courbure (Hessienne, NTK) sont observables dès l'initialisation, en un ou quelques *forward/backward pass*. Si ces quantités sont informatives sur la dynamique future, elles constituent un signal *bon marché*.
-3. **Les outils de HPO actuels ignorent la structure du problème.** Vizier ou Optuna traitent l'entraînement comme une boîte noire \(f(x)\) ; ils ne réutilisent aucune connaissance d'une tâche à l'autre (sauf via des heuristiques de warm-start). Un système de meta-apprentissage entraîné sur des milliers de tâches pourrait, en théorie, généraliser cette connaissance.
+1. **Transfer learning works.** A pre-trained model learns a new task with vastly less data than a fresh model, because it starts from a better region of parameter space. This proves that *the starting point* matters as much as the optimization algorithm.
+2. **The local loss geometry is computable without full training.** The gradient and curvature approximations (Hessian, NTK) are observable right at initialization, in one or a few *forward/backward passes*. If these quantities are informative about future dynamics, they constitute a *cheap* signal.
+3. **Current HPO tools ignore the structure of the problem.** Vizier and Optuna treat training as a black box \(f(x)\); they reuse no knowledge from one task to the next (except via manual warm-start heuristics). A meta-learning system trained across thousands of tasks could, in theory, generalize this knowledge.
 
-Ces trois observations ne *prouvent* pas que notre approche fonctionnera — elles justifient seulement qu'elle **vaut la peine d'être testée rigoureusement**.
+These three observations do not *prove* our approach will work — they only justify that it is **worth testing rigorously**.
 
 ---
 
 ## 4. Research Questions
 
-**Question principale (RQ0)**
+**Main question (RQ0)**
 
-> Dans quelle mesure peut-on prédire les conditions d'entraînement (initialisation, hyperparamètres) permettant une convergence rapide et une forte *sample efficiency*, à partir d'informations disponibles avant l'entraînement complet ?
+> To what extent can we predict the training conditions (initialization, hyperparameters) that enable fast convergence and strong *sample efficiency*, from information available before full training?
 
-**Sous-questions**
+**Sub-questions**
 
-| # | Question | Type de réponse attendue |
+| # | Question | Expected answer type |
 |---|---|---|
-| Q1 | Peut-on prédire un learning rate efficace sans entraînement complet ? | Corrélation puis modèle prédictif |
-| Q2 | Peut-on prédire l'optimizer approprié (SGD/Adam/AdamW/Lion…) ? | Classification |
-| Q3 | Peut-on prédire le batch size ? | Régression / classification ordinale |
-| Q4 | Peut-on prédire weight decay, warmup, LR schedule ? | Régression multi-sortie |
-| Q5 | Peut-on trouver une meilleure stratégie d'initialisation que les heuristiques standards ? | Comparatif |
-| Q6 | Peut-on prédire le nombre de samples nécessaires pour atteindre une performance cible ? | Régression (loi d'échelle locale) |
-| Q7 | Peut-on prédire le nombre de steps nécessaires pour atteindre une loss cible ? | Régression |
-| Q8 | Les propriétés du modèle vierge (spectre, normes, architecture) prédisent-elles sa dynamique future ? | Analyse de feature importance |
-| Q9 | Des tâches synthétiques suffisent-elles à apprendre ces relations ? | Étude de transférabilité |
-| Q10 | Ces connaissances se transfèrent-elles à des modèles et données réelles ? | Validation externe (out-of-distribution) |
+| Q1 | Can we predict an effective learning rate without full training? | Correlation, then predictive model |
+| Q2 | Can we predict the appropriate optimizer (SGD/Adam/AdamW/Lion…)? | Classification |
+| Q3 | Can we predict the batch size? | Regression / ordinal classification |
+| Q4 | Can we predict weight decay, warmup, LR schedule? | Multi-output regression |
+| Q5 | Can we find a better initialization strategy than standard heuristics? | Comparative study |
+| Q6 | Can we predict the number of samples needed to reach a target performance? | Regression (local scaling law) |
+| Q7 | Can we predict the number of steps needed to reach a target loss? | Regression |
+| Q8 | Do the properties of the untrained model (spectrum, norms, architecture) predict its future dynamics? | Feature-importance analysis |
+| Q9 | Are synthetic tasks sufficient to learn these relationships? | Transferability study |
+| Q10 | Does this knowledge transfer to real models and data? | External (out-of-distribution) validation |
 
-Chaque sous-question est associée à une expérience dédiée dans le protocole (§24).
+Each sub-question is tied to a dedicated experiment in the protocol (§24).
 
 ---
 
 ## 5. Hypotheses
 
-Formulées explicitement pour être **falsifiables**.
+Stated explicitly to be **falsifiable**.
 
-- **H1 (signal pré-entraînement).** Les caractéristiques du modèle vierge et de la tâche (avant tout entraînement significatif) portent une information statistiquement exploitable sur la configuration d'entraînement optimale.
-- **H2 (transférabilité synthétique → réel).** Une relation apprise sur des tâches synthétiques génère des prédictions meilleures que les heuristiques par défaut sur des tâches réelles comparables.
-- **H3 (coût de prédiction ≪ coût d'entraînement).** Le coût de calcul de la prédiction (features + inférence du meta-modèle, éventuellement + un *probe* court) est très inférieur au coût d'une recherche d'hyperparamètres classique, pour un gain de performance comparable ou meilleur.
-- **H4 (non-universalité).** Il n'existe **pas** une configuration universelle ; la configuration optimale dépend conjointement de l'architecture, de la tâche et des données — donc un prédicteur *conditionnel* est nécessaire, pas une simple règle empirique globale.
-- **H5 (rendements décroissants du probing).** Au-delà d'un certain budget de *few-step probing* (~0.1–1 % du training), le gain marginal d'information sur la configuration optimale décroît fortement.
+- **H1 (pre-training signal).** The characteristics of the untrained model and of the task (before any significant training) carry statistically exploitable information about the optimal training configuration.
+- **H2 (synthetic → real transferability).** A relationship learned on synthetic tasks produces better predictions than default heuristics on comparable real tasks.
+- **H3 (prediction cost ≪ training cost).** The computational cost of the prediction (features + meta-model inference, possibly + a short *probe*) is far below the cost of a classic hyperparameter search, for a comparable or better performance gain.
+- **H4 (non-universality).** There is **no** universal configuration; the optimal configuration jointly depends on the architecture, the task, and the data — so a *conditional* predictor is required, not a simple global empirical rule.
+- **H5 (diminishing returns of probing).** Beyond a certain *few-step probing* budget (~0.1–1% of training), the marginal information gain about the optimal configuration drops sharply.
 
-Chaque hypothèse est testée indépendamment (§24, §26) ; l'échec d'une hypothèse ne condamne pas les autres.
+Each hypothesis is tested independently (§24, §26); the failure of one hypothesis does not doom the others.
 
 ---
 
 ## 6. State of the Art
 
-| Établi (littérature) | Utilisé industriellement | Plausible mais non démontré | Notre hypothèse propre |
+| Established (literature) | Used industrially | Plausible but unproven | Our own hypothesis |
 |---|---|---|---|
-| Xavier/He init réduisent l'explosion/disparition du gradient | AdamW + cosine schedule + warmup en standard LLM | Les statistiques spectrales à l'init prédisent le LR optimal | Un meta-modèle entraîné sur tâches synthétiques transfère à des tâches réelles |
-| Le NTK décrit la dynamique de réseaux infiniment larges | Bayesian optimization (Vizier, Optuna) pour le HPO | Le NTK à l'initialisation est un proxy exploitable en pratique (largeur finie) | Un budget de probing de 0.1–1 % suffit à corriger une prédiction *zero-shot* |
-| Les *scaling laws* relient taille de modèle/données/compute à la loss | Transfer learning / fine-tuning à partir de checkpoints pré-entraînés | Les scaling laws locales (petite échelle) prédisent le comportement à plus grande échelle | Une architecture-aware + data-aware initialization bat les heuristiques standards de façon généralisable |
-| Le batch size interagit avec le LR optimal (règle linéaire empirique) | Gradient clipping, LR warmup pour stabiliser les Transformers | La cohérence directionnelle du gradient (cosine successif) est corrélée à la vitesse de convergence | Les features de tâche + modèle suffisent, sans accès aux vraies données de la tâche cible |
+| Xavier/He init reduce gradient explosion/vanishing | AdamW + cosine schedule + warmup as standard for LLMs | Spectral statistics at init predict the optimal LR | A meta-model trained on synthetic tasks transfers to real tasks |
+| The NTK describes the dynamics of infinitely wide networks | Bayesian optimization (Vizier, Optuna) for HPO | The NTK at initialization is a usable proxy in practice (finite width) | A probing budget of 0.1–1% suffices to correct a *zero-shot* prediction |
+| *Scaling laws* relate model size/data/compute to loss | Transfer learning / fine-tuning from pre-trained checkpoints | Local (small-scale) scaling laws predict larger-scale behavior | An architecture-aware + data-aware initialization beats standard heuristics in a generalizable way |
+| Batch size interacts with the optimal LR (empirical linear rule) | Gradient clipping, LR warmup to stabilize Transformers | Directional gradient consistency (successive cosine) correlates with convergence speed | Task + model features suffice, without access to the real target-task data |
 
-Ce tableau doit être maintenu à jour au fil du projet — chaque case droite qui se déplace vers la gauche est un résultat publiable.
+This table must be kept up to date as the project progresses — every right-hand cell that moves to the left is a publishable result.
 
 ---
 
 ## 7. Existing Projects
 
-- **Google Vizier** — service de black-box optimization (Bayesian optimization + bandits), utilisé en interne chez Google. Analyse détaillée au §8.
-- **OSS Vizier / "Towards Learning Universal Hyperparameter Optimizers with Transformers" (Google, 2022)** — évolution de la lignée Vizier vers un modèle appris (Transformer) sur des milliers d'études passées pour orienter la recherche dans une nouvelle étude. Signal important : même la philosophie « boîte noire » de Vizier dérive vers un pari structurellement proche de H1 (une relation apprise à travers les tâches transfère) — appliqué *pendant* la recherche plutôt qu'en zero-shot avant elle comme le vise PreTrainOpt. Le désaccord avec Vizier n'est donc pas philosophique mais empirique : à partir de quand la connaissance structurelle vaut-elle plus cher que le coût de l'ignorer ? (voir postscript empirique, §8).
-- **Optuna** — framework open-source de HPO, TPE (Tree-structured Parzen Estimator), pruning intégré (early stopping des essais peu prometteurs).
-- **Ray Tune / Hyperband / ASHA** — recherche à grande échelle avec arrêt précoce agressif des essais peu prometteurs (successive halving).
-- **Population Based Training (PBT, DeepMind)** — hybride évolution + recherche, mute les hyperparamètres *pendant* l'entraînement plutôt qu'entre essais séparés.
-- **AutoML-Zero, NAS (Neural Architecture Search)** — recherche automatique d'architectures, proche mais orthogonale (nous supposons l'architecture donnée).
-- **µP (maximal update parametrization, Microsoft/Tensor Programs)** — reparamétrisation qui rend le LR optimal quasi-invariant à la largeur du réseau : exemple concret qu'une propriété *structurelle* du modèle peut réduire drastiquement le besoin de recherche d'hyperparamètres. **Référence directe et sérieuse pour PreTrainOpt.**
-- **DeepMind "Scaling Laws" / Chinchilla** — lois empiriques reliant taille de modèle, taille de dataset et compute optimal ; proche en esprit (prédire *avant* d'avoir tout entraîné) mais à une échelle différente (across-run, pas within-run dynamics).
+- **Google Vizier** — black-box optimization service (Bayesian optimization + bandits), used internally at Google. Detailed analysis in §8.
+- **OSS Vizier / "Towards Learning Universal Hyperparameter Optimizers with Transformers" (Google, 2022)** — an evolution of the Vizier lineage toward a learned model (Transformer) trained on thousands of past studies to steer the search in a new study. An important signal: even Vizier's "black box" philosophy is drifting toward a bet structurally close to H1 (a relationship learned across tasks transfers) — applied *during* the search rather than zero-shot before it, as PreTrainOpt aims to do. The disagreement with Vizier is therefore not philosophical but empirical: at what point is structural knowledge worth more than the cost of ignoring it? (see empirical postscript, §8).
+- **Optuna** — open-source HPO framework, TPE (Tree-structured Parzen Estimator), built-in pruning (early stopping of unpromising trials).
+- **Ray Tune / Hyperband / ASHA** — large-scale search with aggressive early stopping of unpromising trials (successive halving).
+- **Population Based Training (PBT, DeepMind)** — a hybrid of evolution and search, mutates hyperparameters *during* training rather than between separate trials.
+- **AutoML-Zero, NAS (Neural Architecture Search)** — automated architecture search, close but orthogonal (we assume the architecture is given).
+- **µP (maximal update parametrization, Microsoft/Tensor Programs)** — a reparametrization that makes the optimal LR quasi-invariant to network width: a concrete example that a *structural* property of the model can drastically reduce the need for hyperparameter search. **A direct and serious reference for PreTrainOpt.**
+- **DeepMind "Scaling Laws" / Chinchilla** — empirical laws relating model size, dataset size, and optimal compute; close in spirit (predicting *before* having trained fully) but at a different scale (across-run, not within-run dynamics).
 
-**Positionnement.** PreTrainOpt se situe entre µP (structurel, garanties théoriques mais scope étroit) et Vizier (empirique, scope large mais coûteux). Notre pari : combiner un signal structurel (comme µP) avec un meta-modèle appris (comme Vizier apprend d'un historique d'essais), mais en amont de l'entraînement plutôt que pendant.
+**Positioning.** PreTrainOpt sits between µP (structural, theoretical guarantees but narrow scope) and Vizier (empirical, broad scope but costly). Our bet: combine a structural signal (like µP) with a learned meta-model (like Vizier learns from a history of trials), but upstream of training rather than during it.
 
 ---
 
-## 8. Google Vizier — Analyse
+## 8. Google Vizier — Analysis
 
-**Philosophie.** La phrase d'ouverture de l'abstract du papier Vizier (Golovin et al., 2017) résume toute sa position : *« Any sufficiently complex system acts as a black box when it becomes easier to experiment with than to understand. »* Ce n'est pas un aveu de défaite mais un choix pragmatique assumé : plutôt que de comprendre pourquoi un système se comporte comme il le fait, on le traite comme une fonction opaque \(f(x)\) et on optimise par expérimentation.
+**Philosophy.** The opening sentence of the Vizier paper's abstract (Golovin et al., 2017) sums up its entire position: *"Any sufficiently complex system acts as a black box when it becomes easier to experiment with than to understand."* This is not an admission of defeat but a deliberate pragmatic choice: rather than understanding why a system behaves the way it does, treat it as an opaque function \(f(x)\) and optimize through experimentation.
 
-Cette philosophie est honnête sur ses limites et cohérente avec son objectif : Vizier ne fait aucune hypothèse sur la structure du problème, ce qui le rend *universel* (il devient le moteur de tuning par défaut chez Google, réutilisé jusque dans HyperTune sur Google Cloud ML) — un système qui marche pour n'importe quel \(f(x)\) a une valeur d'ingénierie énorme précisément parce qu'il ne présuppose rien. C'est un papier de *systems engineering* appliqué à l'optimisation (robustesse, passage à l'échelle, service partagé entre milliers d'équipes aux problèmes hétérogènes), pas un papier qui cherche à percer la dynamique d'apprentissage.
+This philosophy is honest about its limits and coherent with its goal: Vizier makes no assumption about the structure of the problem, which makes it *universal* (it becomes the default tuning engine at Google, reused all the way into Google Cloud ML's HyperTune) — a system that works for any \(f(x)\) has enormous engineering value precisely because it presupposes nothing. It is a *systems engineering* paper applied to optimization (robustness, scalability, a service shared across thousands of teams with heterogeneous problems), not a paper that seeks to unravel learning dynamics.
 
-La limite structurelle correspondante — et le point exact où PreTrainOpt se positionne en opposition — est que « boîte noire » veut dire qu'on jette l'information structurelle à chaque nouvelle recherche. Vizier ne sait pas qu'un Transformer à 12 couches et un Transformer à 24 couches partagent une géométrie de perte apparentée (ce que µP exploite explicitement, §9) ; chaque nouvelle tâche redémarre, sauf warm-start manuel. « Plus facile d'expérimenter que de comprendre » est vrai à l'échelle d'ingénierie — un choix rationnel quand on doit servir des milliers d'équipes internes sous contrainte de temps produit — mais ça fige la question de recherche : on optimise, on ne cherche jamais à savoir *pourquoi* telle région de l'espace des hyperparamètres fonctionne. C'est précisément l'angle mort que H1 attaque.
+The corresponding structural limitation — and the exact point where PreTrainOpt positions itself in opposition — is that "black box" means discarding structural information at every new search. Vizier doesn't know that a 12-layer Transformer and a 24-layer Transformer share a related loss geometry (which µP exploits explicitly, §9); every new task starts from scratch, barring manual warm-start. "Easier to experiment with than to understand" is true at engineering scale — a rational choice when you have to serve thousands of internal teams under product time constraints — but it freezes the research question: you optimize, you never seek to know *why* a given region of hyperparameter space works. That is precisely the blind spot H1 targets.
 
-**Principe.** Vizier traite l'entraînement comme une fonction boîte noire \(f(x)\) à optimiser :
+**Principle.** Vizier treats training as a black-box function \(f(x)\) to optimize:
 
 ```
 Search Space → Vizier → Hyperparameters → Training → Metric → Vizier → ...
 ```
 
-**Composants clés :**
+**Key components:**
 
-- *Search space* : domaines (souvent log-scale pour LR, weight decay) et types (continu, discret, catégoriel) des hyperparamètres.
-- *Objective* : une ou plusieurs métriques à optimiser (ex. validation loss, ou un objectif composite).
-- *Trials* : chaque essai = une configuration testée + son résultat.
-- *Bayesian optimization* : un modèle probabiliste (souvent processus gaussien ou modèle de type TPE) apprend la surface \(f(x)\) à partir des essais passés et propose le point suivant en arbitrant exploration/exploitation.
-- *Early stopping* : arrêt des essais peu prometteurs avant la fin de l'entraînement (économie de compute).
-- *Multi-objective* : recherche de front de Pareto quand plusieurs métriques s'opposent (ex. accuracy vs latence).
+- *Search space*: domains (often log-scale for LR, weight decay) and types (continuous, discrete, categorical) of the hyperparameters.
+- *Objective*: one or more metrics to optimize (e.g. validation loss, or a composite objective).
+- *Trials*: each trial = a tested configuration + its result.
+- *Bayesian optimization*: a probabilistic model (often a Gaussian process or a TPE-type model) learns the surface \(f(x)\) from past trials and proposes the next point, arbitrating exploration vs. exploitation.
+- *Early stopping*: stopping unpromising trials before training completes (compute savings).
+- *Multi-objective*: Pareto-front search when several metrics trade off against each other (e.g. accuracy vs. latency).
 
-**Limite fondamentale pour notre objectif.** Vizier **entraîne toujours** pour évaluer une configuration — même partiellement. Il n'a aucune notion de « caractéristiques du modèle/de la tâche » réutilisables d'une recherche à l'autre : chaque nouvelle tâche redémarre (sauf warm-start manuel).
+**Fundamental limitation for our objective.** Vizier **always trains** to evaluate a configuration — even partially. It has no notion of reusable "model/task characteristics" from one search to another: every new task restarts (barring manual warm-start).
 
-**Différence avec PreTrainOpt :**
+**Difference with PreTrainOpt:**
 
 ```
 Vizier :        Configuration → Training → Metric
-PreTrainOpt :    Model/Task analysis → Prediction → Configuration → (Probe minimal) → Validation
+PreTrainOpt :    Model/Task analysis → Prediction → Configuration → (Minimal probe) → Validation
 ```
 
-**Rôle de Vizier dans notre projet.** Il n'est pas un concurrent à remplacer d'emblée mais un **outil pour construire le meta-dataset** : pendant la phase de recherche (laboratoire synthétique), Vizier (ou un équivalent Bayesian optimization) sert à trouver la configuration quasi-optimale *réelle* de chaque tâche synthétique — ce résultat devient un exemple d'entraînement pour notre meta-modèle. Vizier est donc utilisé **hors ligne**, comme génération de vérité terrain, pas comme composant du système final.
+**Vizier's role in our project.** It is not a competitor to replace outright but a **tool for building the meta-dataset**: during the research phase (synthetic laboratory), Vizier (or an equivalent Bayesian optimization method) is used to find the near-optimal *real* configuration for each synthetic task — that result becomes a training example for our meta-model. Vizier is thus used **offline**, as ground-truth generation, not as a component of the final system.
 
-**Postscript empirique (MVP, prototype Rust/Optuna/LightGBM du §39).** Le premier prototype construit dans le cadre de ce document a donné une illustration concrète, à petite échelle, de ce compromis boîte-noire vs. structure :
+**Empirical postscript (MVP, Rust/Optuna/LightGBM prototype from §39).** The first prototype built as part of this document gave a concrete, small-scale illustration of this black-box-vs-structure trade-off:
 
-- Le signal structurel existe mais est faible et inégal selon l'hyperparamètre. Sur 110 tâches synthétiques (MLP, régression), un meta-modèle gradient boosting prédit le learning rate optimal avec une corrélation modeste (rho ≈ 0.36, 52 % des prédictions à moins de 2× de la vraie valeur) — un vrai signal, loin d'être suffisant seul. Pour optimizer/init_method en revanche, le même meta-modèle prédisait **moins bien qu'une règle triviale** (toujours répondre la classe majoritaire) : 33-57 % de précision contre 43-67 % pour la baseline naïve.
-- Tenter d'exploiter plus de structure (un *few-step probe* inspiré de l'early stopping de Vizier — quelques dizaines de steps réels avant de choisir optimizer/init) a d'abord **activement nui** : calibré à une seule graine, il rendait les prédictions significativement pires (p = 0.027) qu'ignorer le probe. La cause : chaque essai repart d'une initialisation aléatoire différente, donc un probe à une seule graine par candidat est une mesure bruitée, pas un verdict fiable.
-- Moyenner le probe sur 10 graines indépendantes a corrigé la précision brute (45 % → 62 % de bonnes réponses optimizer/init) sans pour autant produire un gain net et significatif de vitesse de convergence (8 victoires / 13 défaites sur 21 tâches tenues à l'écart, p = 0.19) — signe que l'étiquette « meilleure config » elle-même est bruitée (le paysage de qualité entre combinaisons est probablement assez plat pour beaucoup de tâches).
+- Structural signal exists but is weak and uneven across hyperparameters. On 110 synthetic tasks (MLP, regression), a gradient-boosting meta-model predicts the optimal learning rate with a modest correlation (rho ≈ 0.36, 52% of predictions within 2x of the true value) — a real signal, far from sufficient on its own. For optimizer/init_method, by contrast, the same meta-model predicted **worse than a trivial rule** (always answer the majority class): 33-57% accuracy versus 43-67% for the naive baseline.
+- Trying to exploit more structure (a *few-step probe* inspired by Vizier's early stopping — a few dozen real steps before choosing optimizer/init) first **actively hurt**: calibrated with a single seed, it made predictions significantly worse (p = 0.027) than ignoring the probe. The cause: every trial starts from a different random initialization, so a single-seed probe per candidate is a noisy measurement, not a reliable verdict.
+- Averaging the probe over 10 independent seeds fixed the raw accuracy (45% → 62% correct optimizer/init answers) without producing a net, significant gain in convergence speed (8 wins / 13 losses across 21 held-out tasks, p = 0.19) — a sign that the "best config" label itself is noisy (the quality landscape across combinations is likely fairly flat for many tasks).
 
-Ce n'est ni une validation ni une réfutation de H1 : c'est la démonstration empirique, en miniature, de la thèse de ce paragraphe — exploiter la structure plutôt que la boîte noire est possible mais coûte cher en rigueur méthodologique (calibration, réplication, seeds), et peut activement nuire si elle est mal exécutée. La boîte noire ne gagne pas parce qu'elle est meilleure ; elle gagne par défaut tant que l'exploitation de la structure n'a pas été correctement maîtrisée.
+This is neither a validation nor a refutation of H1: it is the empirical demonstration, in miniature, of this section's thesis — exploiting structure instead of the black box is possible but costs real methodological rigor (calibration, replication, seeds), and can actively backfire if done poorly. The black box doesn't win because it's better; it wins by default until structure-exploitation has been properly mastered.
 
 ---
 
 ## 9. Theoretical Foundations
 
-- **Descente de gradient et rôle du LR.** \(\theta_{t+1} = \theta_t - \eta \nabla_\theta L\) — le LR contrôle l'amplitude du pas ; trop petit → convergence lente ; trop grand → divergence/oscillation. La région stable dépend de la courbure locale (voir Hessienne).
-- **Neural Tangent Kernel (NTK).** Dans la limite de largeur infinie, la dynamique d'un réseau entraîné par gradient descent est équivalente à un modèle linéaire dans un espace de features fixé par le noyau tangent à l'initialisation \(K(x,x') = \nabla_\theta f(x)^\top \nabla_\theta f(x')\). En largeur finie, le NTK évolue pendant l'entraînement, mais son spectre à l'initialisation reste un indicateur exploité dans la littérature pour analyser la « trainability ».
-- **µP (maximal update parametrization).** Reparamétrisation des poids et du LR par couche telle que la dynamique d'apprentissage (au premier ordre) devienne invariante à la largeur du réseau — permettant de régler le LR sur un petit modèle et de le transférer directement à un grand modèle. C'est la preuve la plus concrète, à ce jour, qu'une propriété structurelle **connue avant training** peut remplacer une recherche d'hyperparamètres.
-- **Scaling laws.** Relations empiriques \(L(N, D, C) \approx\) fonction puissance de la taille de modèle \(N\), de données \(D\), de compute \(C\). Utiles pour extrapoler, mais définies *entre* runs complets, pas *dans* la dynamique d'un run — pertinence indirecte pour PreTrainOpt (comme inspiration méthodologique).
-- **Analyse de la Hessienne / sharpness.** La courbure locale \(\nabla^2 L(\theta_0)\) borne la taille de pas stable (analogue à la condition de stabilité \(\eta < 2/\lambda_{max}\) en optimisation convexe quadratique). Le calcul exact est coûteux (\(O(P^2)\)) ; des approximations (Hutchinson trace estimator, power iteration sur le produit Hessien-vecteur) sont utilisables à coût \(O(P)\) par évaluation.
-- **Information de Fisher.** \(F = \mathbb{E}[\nabla \log p(y|x;\theta)\nabla \log p(y|x;\theta)^\top]\) — relie la géométrie de la loss à la courbure ; utilisée par les optimizers naturels (K-FAC) et comme proxy de « quantité d'information exploitable » par les données.
+- **Gradient descent and the role of the LR.** \(\theta_{t+1} = \theta_t - \eta \nabla_\theta L\) — the LR controls the step size; too small → slow convergence; too large → divergence/oscillation. The stable region depends on the local curvature (see Hessian).
+- **Neural Tangent Kernel (NTK).** In the infinite-width limit, the dynamics of a network trained by gradient descent are equivalent to a linear model in a feature space fixed by the tangent kernel at initialization \(K(x,x') = \nabla_\theta f(x)^\top \nabla_\theta f(x')\). At finite width, the NTK evolves during training, but its spectrum at initialization remains an indicator used in the literature to analyze "trainability".
+- **µP (maximal update parametrization).** A per-layer reparametrization of weights and LR such that the learning dynamics (to first order) become invariant to network width — allowing the LR to be tuned on a small model and transferred directly to a large one. It is the most concrete proof, to date, that a structural property **known before training** can replace a hyperparameter search.
+- **Scaling laws.** Empirical relations \(L(N, D, C) \approx\) a power-law function of model size \(N\), data \(D\), and compute \(C\). Useful for extrapolation, but defined *between* complete runs, not *within* a run's dynamics — indirect relevance to PreTrainOpt (as methodological inspiration).
+- **Hessian analysis / sharpness.** The local curvature \(\nabla^2 L(\theta_0)\) bounds the stable step size (analogous to the stability condition \(\eta < 2/\lambda_{max}\) in quadratic convex optimization). Exact computation is expensive (\(O(P^2)\)); approximations (Hutchinson trace estimator, power iteration on the Hessian-vector product) are usable at \(O(P)\) cost per evaluation.
+- **Fisher information.** \(F = \mathbb{E}[\nabla \log p(y|x;\theta)\nabla \log p(y|x;\theta)^\top]\) — relates loss geometry to curvature; used by natural-gradient optimizers (K-FAC) and as a proxy for "exploitable information quantity" from the data.
 
-**Conclusion de section.** Il existe des fondations théoriques *partielles* qui rendent l'hypothèse H1 plausible (NTK, µP, Hessienne locale) — mais aucune ne fournit, en l'état, un prédicteur généraliste couvrant tous les hyperparamètres (optimizer, batch, schedule). C'est précisément l'espace que PreTrainOpt explore empiriquement.
+**Section conclusion.** *Partial* theoretical foundations exist that make hypothesis H1 plausible (NTK, µP, local Hessian) — but none currently provide a general-purpose predictor covering all hyperparameters (optimizer, batch, schedule). This is precisely the space PreTrainOpt explores empirically.
 
 ---
 
 ## 10. Training Dynamics
 
-Variables à instrumenter à chaque step (ou à intervalle régulier) pendant les entraînements du laboratoire :
+Variables to instrument at every step (or at regular intervals) during the laboratory's training runs:
 
 $$
 L_t,\quad \|\nabla L_t\|,\quad \|\theta_t\|,\quad \|\Delta\theta_t\|,\quad \frac{\|\nabla L_t\|}{\|\theta_t\|},\quad \cos(g_t, g_{t-1})
 $$
 
-| Signal | Utilité | Coût | Calculable avant training complet ? |
+| Signal | Usefulness | Cost | Computable before full training? |
 |---|---|---|---|
-| Norme du gradient \(\|\nabla L\|\) | Détecte vanishing/exploding gradients | Faible (déjà calculé) | Oui — dès le 1er backward |
-| Cosinus successif \(\cos(g_t,g_{t-1})\) | Cohérence directionnelle ≈ proxy de « qualité » du signal d'apprentissage | Faible | Nécessite ≥ 2 steps |
-| Variance du gradient (entre échantillons d'un batch) | Bruit d'estimation, lié au batch size optimal | Moyen | Oui, sur quelques batches |
-| Norme des mises à jour \(\|\Delta\theta\|\) | Vitesse effective de déplacement | Faible | Après 1 step |
-| Statistiques d'activation (moyenne/variance par couche) | Détecte saturation, dead ReLU | Faible | Oui — 1 forward pass |
-| Statistiques des poids (norme par couche, distribution) | Qualité de l'initialisation | Nul (poids connus) | Oui — avant tout training |
-| Approximation de la courbure (Hutchinson trace, power iteration) | Stabilité, LR max théorique | Moyen à élevé | Oui — quelques backward supplémentaires |
-| NTK (spectre, condition number approximés) | « Trainability » théorique | Élevé (approximations nécessaires en pratique) | Oui à l'init, coûteux à grande échelle |
-| Sharpness (loss autour de \(\theta\) après perturbation) | Lien avec la généralisation | Élevé | Nécessite plusieurs forward |
+| Gradient norm \(\|\nabla L\|\) | Detects vanishing/exploding gradients | Low (already computed) | Yes — from the 1st backward pass |
+| Successive cosine \(\cos(g_t,g_{t-1})\) | Directional consistency ≈ proxy for "quality" of the learning signal | Low | Requires ≥ 2 steps |
+| Gradient variance (across a batch's samples) | Estimation noise, linked to the optimal batch size | Medium | Yes, over a few batches |
+| Update norm \(\|\Delta\theta\|\) | Effective displacement speed | Low | After 1 step |
+| Activation statistics (mean/variance per layer) | Detects saturation, dead ReLUs | Low | Yes — 1 forward pass |
+| Weight statistics (per-layer norm, distribution) | Initialization quality | None (weights already known) | Yes — before any training |
+| Curvature approximation (Hutchinson trace, power iteration) | Stability, theoretical max LR | Medium to high | Yes — a few extra backward passes |
+| NTK (approximated spectrum, condition number) | Theoretical "trainability" | High (approximations needed in practice) | Yes at init, expensive at scale |
+| Sharpness (loss around \(\theta\) after perturbation) | Link to generalization | High | Requires several forward passes |
 
-**Classement pour un système « bon marché » (candidats prioritaires) :** statistiques de poids/activations à l'init, norme et variance du gradient sur quelques batches, cosinus successif sur une courte fenêtre. **Candidats coûteux à différer en V2+ :** NTK complet, Hessienne complète, sharpness par perturbation exhaustive.
+**Ranking for a "cheap" system (priority candidates):** weight/activation statistics at init, gradient norm and variance over a few batches, successive cosine over a short window. **Expensive candidates to defer to V2+:** full NTK, full Hessian, exhaustive perturbation-based sharpness.
 
 ---
 
 ## 11. Hyperparameter Taxonomy
 
-### Optimisation
+### Optimization
 learning rate · optimizer (SGD/Adam/AdamW/Lion…) · momentum · β1 · β2 · ε · weight decay · gradient clipping
 
 ### Training
-batch size · gradient accumulation · epochs · warmup (durée, forme) · scheduler (cosine/exponentiel/step/constant) · mixed precision
+batch size · gradient accumulation · epochs · warmup (duration, shape) · scheduler (cosine/exponential/step/constant) · mixed precision
 
 ### Architecture
-depth · width · activation · normalisation (BatchNorm/LayerNorm/RMSNorm) · connexions résiduelles · configuration d'attention · méthode d'initialisation
+depth · width · activation · normalization (BatchNorm/LayerNorm/RMSNorm) · residual connections · attention configuration · initialization method
 
-### Initialisation
-Xavier/Glorot · He/Kaiming · orthogonale · normale/uniforme · scaled init · *architecture-aware* (ex. µP) · *data-aware* (calibrée sur un échantillon de données)
+### Initialization
+Xavier/Glorot · He/Kaiming · orthogonal · normal/uniform · scaled init · *architecture-aware* (e.g. µP) · *data-aware* (calibrated on a data sample)
 
-### Données
-taille du dataset · bruit · diversité · redondance · distribution · entropie · complexité · déséquilibre de classes · curriculum · augmentation
+### Data
+dataset size · noise · diversity · redundancy · distribution · entropy · complexity · class imbalance · curriculum · augmentation
 
-Pour **chaque** hyperparamètre, la grille d'analyse standard à appliquer (documentée une fois, appliquée systématiquement dans le meta-dataset) :
+For **each** hyperparameter, the standard analysis grid to apply (documented once, applied systematically in the meta-dataset):
 
-1. rôle fonctionnel ;
-2. influence sur le gradient (norme, variance, direction) ;
-3. influence sur la convergence (vitesse, stabilité) ;
-4. interactions connues avec d'autres hyperparamètres (ex. LR ↔ batch size, LR ↔ largeur via µP) ;
-5. comment le mesurer empiriquement dans le laboratoire ;
-6. quel(s) signal(aux) pré-training pourrai(en)t le prédire ;
-7. quel algorithme de recherche l'optimise le mieux en *ground truth* (Bayesian opt, grid, etc.).
+1. functional role;
+2. influence on the gradient (norm, variance, direction);
+3. influence on convergence (speed, stability);
+4. known interactions with other hyperparameters (e.g. LR ↔ batch size, LR ↔ width via µP);
+5. how to measure it empirically in the laboratory;
+6. which pre-training signal(s) could predict it;
+7. which search algorithm optimizes it best as *ground truth* (Bayesian opt, grid, etc.).
 
 ---
 
 ## 12. Initialization
 
-Méthodes à comparer systématiquement (baselines obligatoires du benchmark d'initialisation) :
+Methods to compare systematically (mandatory baselines for the initialization benchmark):
 
-- **Xavier/Glorot** — variance calibrée pour activations linéaires/tanh.
-- **He/Kaiming** — variance calibrée pour ReLU et variantes.
-- **Orthogonale** — préserve la norme lors de la propagation, utile en RNN profonds.
-- **Normale / uniforme simples** — baselines naïves.
-- **Scaled init** (ex. GPT-2 style : échelle en \(1/\sqrt{2L}\) pour les couches résiduelles profondes).
-- **Architecture-aware (µP)** — LR et variance d'initialisation par couche dépendant explicitement de la largeur, pour rendre la dynamique invariante à l'échelle.
-- **Data-aware init** — calibrée à partir d'un échantillon (LSUV — *Layer-Sequential Unit-Variance*, ou normalisation des activations mesurée sur un mini-batch avant training).
-- **Nouvelles méthodes candidates (à explorer, non validées)** — initialisation conditionnée par les features de tâche prédites par notre propre meta-modèle (Q5).
+- **Xavier/Glorot** — variance calibrated for linear/tanh activations.
+- **He/Kaiming** — variance calibrated for ReLU and its variants.
+- **Orthogonal** — preserves norm during propagation, useful in deep RNNs.
+- **Simple normal / uniform** — naive baselines.
+- **Scaled init** (e.g. GPT-2 style: scaling by \(1/\sqrt{2L}\) for deep residual layers).
+- **Architecture-aware (µP)** — per-layer LR and initialization variance explicitly dependent on width, to make the dynamics scale-invariant.
+- **Data-aware init** — calibrated from a sample (LSUV — *Layer-Sequential Unit-Variance*, or activation normalization measured on a mini-batch before training).
+- **New candidate methods (to explore, unvalidated)** — initialization conditioned on task features predicted by our own meta-model (Q5).
 
 ---
 
 ## 13. Synthetic Learning Laboratory
 
-Composant central du projet : un générateur de **tâches contrôlées**, permettant de faire varier un facteur à la fois (nécessaire pour l'inférence causale, §15).
+The project's central component: a generator of **controlled tasks**, allowing one factor to be varied at a time (necessary for causal inference, §15).
 
-**Fonctions génératrices types :**
+**Typical generative functions:**
 
 $$
 y = x_1 + x_2 \qquad y = \sin(x_1) + 0.5x_2^2 - x_3x_4 + \epsilon \qquad y = \sin(x_1x_2) + e^{-x_3}
 $$
 
-**Paramètres contrôlables :**
+**Controllable parameters:**
 
-- dimension d'entrée ;
-- niveau de bruit \(\epsilon\) ;
-- complexité (degré de non-linéarité, nombre de termes d'interaction) ;
-- redondance (fraction de features corrélées/dupliquées) ;
-- diversité / distribution (uniforme, gaussienne, mélange) ;
-- taille du dataset ;
-- déséquilibre de classes (pour les tâches de classification).
+- input dimension;
+- noise level \(\epsilon\);
+- complexity (degree of nonlinearity, number of interaction terms);
+- redundancy (fraction of correlated/duplicated features);
+- diversity / distribution (uniform, Gaussian, mixture);
+- dataset size;
+- class imbalance (for classification tasks).
 
-**Architectures couvertes en V0.1 :** MLP (regression/classification synthétique). Extension prévue : CNN sur images synthétiques procédurales (formes, textures paramétriques), Transformer miniature sur séquences synthétiques (tâches de copie, tri, parité — inspirées des benchmarks d'algorithmic reasoning).
+**Architectures covered in V0.1:** MLP (synthetic regression/classification). Planned extension: CNN on procedurally generated synthetic images (parametric shapes, textures), miniature Transformer on synthetic sequences (copy, sort, parity tasks — inspired by algorithmic-reasoning benchmarks).
 
-**Pourquoi synthétique plutôt que réel dès le départ ?** Parce qu'on contrôle exactement la variable qu'on fait varier — condition nécessaire pour distinguer corrélation et causalité (§15). Un dataset réel confond systématiquement plusieurs facteurs (bruit, redondance, distribution) qu'on ne peut pas isoler.
+**Why synthetic rather than real from the start?** Because we control exactly the variable being varied — a necessary condition to distinguish correlation from causation (§15). A real dataset systematically confounds several factors (noise, redundancy, distribution) that cannot be isolated.
 
 ---
 
 ## 14. Meta-Learning
 
-**Formulation du problème :**
+**Problem formulation:**
 
 $$
 (X_{model}, X_{task}, X_{data}) \;\longrightarrow\; \mathrm{OptimalTrainingConfiguration}
 $$
 
-**Approches candidates, comparées :**
+**Candidate approaches, compared:**
 
-| Approche | Précision attendue | Coût | Complexité d'implémentation | Scalabilité | Adapté au 1er prototype ? |
+| Approach | Expected accuracy | Cost | Implementation complexity | Scalability | Suited to the 1st prototype? |
 |---|---|---|---|---|---|
-| Modèle supervisé simple (gradient boosting / random forest sur features tabulaires) | Moyenne | Faible | Faible | Bonne | **Oui — recommandé** |
-| Gaussian Processes (surrogate) | Bonne en faible dimension | Moyen | Moyen | Faible (mise à l'échelle en \(O(n^3)\)) | Non (V2+) |
-| Bayesian optimization (par tâche, pas meta) | Bonne mais coûteuse par tâche | Élevé (entraînements réels) | Faible (Optuna/Vizier existants) | Bonne | Utilisé en génération de vérité terrain, pas comme prédicteur final |
-| Réseau de neurones (MLP sur features) | Bonne si assez de données meta | Moyen | Moyen | Bonne | V0.3+ une fois le meta-dataset assez grand |
-| Graph Neural Network (représentation de l'architecture comme graphe) | Potentiellement la meilleure généralisation inter-architectures | Élevé | Élevé | Moyenne | V0.4+ (quand on couvre plusieurs familles d'architectures) |
-| Transformers pour meta-learning (en confonction de séquences d'essais) | Prometteur mais data-hungry | Élevé | Élevé | Bonne à grande échelle | Recherche exploratoire, pas prioritaire |
-| Learned optimizers (méta-apprentissage de la règle de mise à jour elle-même) | Ambitieux, hors scope initial | Très élevé | Très élevé | Faible en l'état de l'art | Non — piste séparée (§27) |
+| Simple supervised model (gradient boosting / random forest on tabular features) | Medium | Low | Low | Good | **Yes — recommended** |
+| Gaussian Processes (surrogate) | Good in low dimension | Medium | Medium | Poor (scales as \(O(n^3)\)) | No (V2+) |
+| Bayesian optimization (per task, not meta) | Good but expensive per task | High (real training runs) | Low (existing Optuna/Vizier) | Good | Used for ground-truth generation, not as the final predictor |
+| Neural network (MLP on features) | Good if enough meta-data | Medium | Medium | Good | V0.3+ once the meta-dataset is large enough |
+| Graph Neural Network (architecture represented as a graph) | Potentially the best cross-architecture generalization | High | High | Medium | V0.4+ (once several architecture families are covered) |
+| Transformers for meta-learning (over sequences of trials) | Promising but data-hungry | High | High | Good at scale | Exploratory research, not a priority |
+| Learned optimizers (meta-learning the update rule itself) | Ambitious, out of initial scope | Very high | Very high | Poor at the current state of the art | No — a separate track (§27) |
 
-**Recommandation pour le prototype (V0.2) :** un modèle **gradient boosting** (type LightGBM/XGBoost) sur features tabulaires (statistiques du modèle + statistiques de la tâche). Justification : interprétable (feature importance directement exploitable pour Q8), peu de données nécessaires comparé à un réseau de neurones, rapide à itérer, standard robuste en tabulaire.
+**Recommendation for the prototype (V0.2):** a **gradient boosting** model (LightGBM/XGBoost type) on tabular features (model statistics + task statistics). Rationale: interpretable (feature importance directly usable for Q8), needs little data compared to a neural network, fast to iterate on, a robust tabular-data standard.
 
 ---
 
 ## 15. Causal Experimental Framework
 
-**Principe.** Ne pas se contenter de corrélations observées sur le meta-dataset — vérifier, par expérimentation contrôlée, que changer un facteur *cause* effectivement un changement de dynamique.
+**Principle.** Don't settle for correlations observed on the meta-dataset — verify, through controlled experimentation, that changing a factor actually *causes* a change in dynamics.
 
 ```
-Expérience contrôlée
+Controlled experiment
         ↓
-Changer UN SEUL facteur
+Change ONE SINGLE factor
         ↓
-Mesurer l'effet (steps-to-threshold, etc.)
+Measure the effect (steps-to-threshold, etc.)
         ↓
-Répéter (autres graines aléatoires)
+Repeat (other random seeds)
         ↓
-Analyse des interactions (2 facteurs à la fois)
+Analyze interactions (2 factors at a time)
         ↓
-Hypothèse causale
+Causal hypothesis
 ```
 
-**Méthodes à mobiliser :**
+**Methods to mobilize:**
 
-- **Plans d'expériences factoriels** (*factorial design*) — faire varier \(k\) facteurs à 2 ou 3 niveaux simultanément, avec réplication, pour estimer effets principaux et interactions à moindre coût qu'un balayage exhaustif.
-- **Études d'ablation** — retirer un composant du système (feature, module) et mesurer la perte de performance (voir §26).
-- **Analyse de sensibilité / indices de Sobol** — décomposer la variance de la métrique de sortie par facteur et par interaction, pour quantifier (pas seulement classer) l'importance de chaque facteur.
-- **ANOVA** — test statistique de significativité des effets principaux/interactions dans un plan factoriel.
-- **SHAP (SHapley Additive exPlanations)** — sur le meta-modèle final, pour expliquer *quelles features* motivent chaque prédiction (utile pour Q8, et pour la confiance produit).
-- **Graphes causaux (DAG) + expériences d'intervention** — au-delà de la corrélation observationnelle, formaliser les hypothèses de causalité (ex. « largeur → LR optimal » plutôt que l'inverse) et les tester par intervention directe (fixer la largeur, faire varier le reste).
+- **Factorial experimental designs** — vary \(k\) factors at 2 or 3 levels simultaneously, with replication, to estimate main effects and interactions at a lower cost than an exhaustive sweep.
+- **Ablation studies** — remove a system component (feature, module) and measure the performance loss (see §26).
+- **Sensitivity analysis / Sobol indices** — decompose the output metric's variance by factor and by interaction, to quantify (not just rank) each factor's importance.
+- **ANOVA** — statistical significance test for main effects/interactions in a factorial design.
+- **SHAP (SHapley Additive exPlanations)** — on the final meta-model, to explain *which features* drive each prediction (useful for Q8, and for product trust).
+- **Causal graphs (DAGs) + intervention experiments** — beyond observational correlation, formalize causal hypotheses (e.g. "width → optimal LR" rather than the reverse) and test them through direct intervention (fix width, vary the rest).
 
-**Pertinence relative.** Les plans factoriels + ANOVA/Sobol sont **indispensables** dès la phase 1 (peu coûteux, rigoureux). SHAP est utile en continu sur le meta-modèle. Les graphes causaux formels sont une couche de rigueur supplémentaire à introduire une fois les relations empiriques principales stabilisées (phase 3+).
+**Relative relevance.** Factorial designs + ANOVA/Sobol are **indispensable** from Phase 1 onward (cheap, rigorous). SHAP is useful on an ongoing basis on the meta-model. Formal causal graphs are an additional layer of rigor to introduce once the main empirical relationships have stabilized (Phase 3+).
 
 ---
 
 ## 16. Mathematical Formulation
 
-**Problème général.**
+**General problem.**
 
 $$
 H^* = \arg\min_H \; \mathbb{E}\big[\mathcal{C}(H, \mathrm{Model}, \mathrm{Task})\big]
 $$
 
-où \(\mathcal{C}\) est un coût combinant performance, vitesse de convergence et budget de calcul (voir §17).
+where \(\mathcal{C}\) is a cost combining performance, convergence speed, and compute budget (see §17).
 
-**Cible de prédiction directe :**
+**Direct prediction target:**
 
 $$
 T_\epsilon = \min\{t : L_t < \epsilon\}
 $$
 
-le nombre de steps nécessaires pour atteindre une loss cible \(\epsilon\). On cherche un modèle \(g\) tel que :
+the number of steps needed to reach a target loss \(\epsilon\). We seek a model \(g\) such that:
 
 $$
 \widehat{T_\epsilon} = g\big(X_{model}, X_{task}, H\big) \approx T_\epsilon
 $$
 
-**Reformulation du problème d'optimisation classique en problème de prédiction :**
+**Reformulating the classic optimization problem as a prediction problem:**
 
 $$
-\underbrace{H \rightarrow \mathrm{Train}(H) \rightarrow \mathrm{Performance}}_{\text{approche classique (Vizier)}}
+\underbrace{H \rightarrow \mathrm{Train}(H) \rightarrow \mathrm{Performance}}_{\text{classic approach (Vizier)}}
 \qquad\Longrightarrow\qquad
 \underbrace{X_{model}, X_{task}, X_{data} \rightarrow \mathrm{Predict}(H^*)}_{\text{PreTrainOpt}}
 $$
 
-**Objectif multi-critère (voir §17) :**
+**Multi-criteria objective (see §17):**
 
 $$
-\min\big(T_\epsilon,\; N_\epsilon,\; \mathrm{FLOPs}_\epsilon\big) \quad \text{sous contrainte} \quad \mathrm{Accuracy} \geq \mathrm{seuil}
+\min\big(T_\epsilon,\; N_\epsilon,\; \mathrm{FLOPs}_\epsilon\big) \quad \text{subject to} \quad \mathrm{Accuracy} \geq \mathrm{threshold}
 $$
 
 ---
 
 ## 17. Optimization Objectives
 
-Ne pas se limiter à la validation loss finale. Métriques cibles :
+Don't limit ourselves to the final validation loss. Target metrics:
 
-- \(T_\epsilon\) — **steps** nécessaires pour atteindre une loss cible \(\epsilon\) ;
-- \(N_\epsilon\) — **samples** nécessaires pour atteindre une performance cible (*sample efficiency*) ;
-- \(C_\epsilon\) — **compute** (FLOPs) nécessaire ;
-- \(E_\epsilon\) — **énergie** consommée (proxy : FLOPs × facteur matériel, ou mesure directe si l'infra le permet) ;
-- \(\mathrm{AUC} = \int L(t)\,dt\) — aire sous la courbe d'apprentissage, résume toute la trajectoire en un scalaire.
+- \(T_\epsilon\) — **steps** needed to reach a target loss \(\epsilon\);
+- \(N_\epsilon\) — **samples** needed to reach a target performance (*sample efficiency*);
+- \(C_\epsilon\) — **compute** (FLOPs) needed;
+- \(E_\epsilon\) — **energy** consumed (proxy: FLOPs × hardware factor, or a direct measurement if the infrastructure allows it);
+- \(\mathrm{AUC} = \int L(t)\,dt\) — area under the learning curve, summarizes the whole trajectory as a scalar.
 
-**Objectif composite :**
+**Composite objective:**
 
 $$
 \mathrm{Efficiency} = f(\mathrm{Performance}, N_\epsilon, T_\epsilon, C_\epsilon, \mathrm{Memory}, E_\epsilon)
 $$
 
-En pratique, on formule un problème **multi-objectif** (front de Pareto entre vitesse de convergence, sample efficiency et performance finale) plutôt qu'un scalaire unique arbitraire — la pondération entre objectifs est un choix produit, pas un fait scientifique, et doit rester explicite et ajustable.
+In practice, we formulate a **multi-objective** problem (Pareto front between convergence speed, sample efficiency, and final performance) rather than a single arbitrary scalar — the weighting between objectives is a product choice, not a scientific fact, and must remain explicit and adjustable.
 
 ---
 
@@ -487,65 +488,65 @@ En pratique, on formule un problème **multi-objectif** (front de Pareto entre v
              Meta-dataset update
 ```
 
-**Composants :**
+**Components:**
 
-- **Model Analyzer** — inspecte l'architecture (nombre de paramètres, profondeur, largeur, types de couches, normalisation) sans exécuter de training.
-- **Feature Extraction** — calcule les features modèle (statistiques de poids à l'init, spectre approximé) et tâche (statistiques du dataset échantillonné : dimension, bruit estimé, entropie, redondance).
-- **Meta Predictor** — le meta-modèle (§14), produit une ou plusieurs configurations candidates avec un score de confiance.
-- **Rank/Optimize** — si plusieurs candidates, arbitrage (éventuellement via une mini-recherche locale autour de la prédiction).
-- **Optional Probe** — quelques steps réels d'entraînement pour corriger la prédiction *zero-shot* si le budget le permet (§15 du prompt original / régimes définis au §15 ci-dessous... voir aussi la section dédiée "Zero-training ou minimal-training").
-- **Feedback loop** — le résultat réel de l'entraînement complet est renvoyé dans l'*experiment database*, pour ré-entraîner périodiquement le meta-modèle (continual meta-learning, §23 du prompt / repris ci-dessous dans le Roadmap).
+- **Model Analyzer** — inspects the architecture (parameter count, depth, width, layer types, normalization) without running any training.
+- **Feature Extraction** — computes model features (weight statistics at init, approximated spectrum) and task features (sampled dataset statistics: dimension, estimated noise, entropy, redundancy).
+- **Meta Predictor** — the meta-model (§14), produces one or more candidate configurations with a confidence score.
+- **Rank/Optimize** — if multiple candidates, arbitration (possibly via a local mini-search around the prediction).
+- **Optional Probe** — a few real training steps to correct the *zero-shot* prediction if the budget allows (§15; see also the dedicated "zero-training or minimal-training" regimes).
+- **Feedback loop** — the real outcome of the full training run is fed back into the *experiment database*, to periodically retrain the meta-model (continual meta-learning, §23 and the Roadmap below).
 
 ---
 
 ## 19. Software Architecture
 
-Langage principal : **Rust** (performance, sûreté mémoire, cohérent avec l'écosystème déjà utilisé par ailleurs) avec **intégration Python** pour l'écosystème ML (PyTorch/JAX, notebooks d'analyse, prototypage rapide du meta-modèle).
+Main language: **Rust** (performance, memory safety, consistent with the ecosystem already used elsewhere) with **Python integration** for the ML ecosystem (PyTorch/JAX, analysis notebooks, rapid meta-model prototyping).
 
 ```
 pretrainopt/
-├── core/           # types partagés, config, erreurs, traits communs
-├── model/          # définition et introspection de modèles (MLP, CNN, Transformer)
-├── taskgen/        # générateur de tâches synthétiques paramétriques
-├── analysis/       # extraction de features (spectral, jacobien, courbure, statistiques)
-├── initialization/ # stratégies d'initialisation (standard + architecture/data-aware)
+├── core/           # shared types, config, errors, common traits
+├── model/          # model definition and introspection (MLP, CNN, Transformer)
+├── taskgen/        # parametric synthetic task generator
+├── analysis/       # feature extraction (spectral, jacobian, curvature, statistics)
+├── initialization/ # initialization strategies (standard + architecture/data-aware)
 ├── optimization/   # optimizers, schedulers, gradient clipping
-├── meta/           # meta-modèle : features → prédiction de configuration
-├── experiments/    # runner d'expériences, orchestration des trials
-├── benchmark/      # baselines (random/grid/Bayesian/Vizier/Optuna), comparateurs
-├── storage/        # persistance de l'experiment database / meta-dataset
-├── api/            # service d'inférence (prédiction de configuration)
-├── cli/            # interface en ligne de commande
-└── dashboard/      # visualisation des expériences, courbes, feature importance
+├── meta/           # meta-model: features → configuration prediction
+├── experiments/    # experiment runner, trial orchestration
+├── benchmark/      # baselines (random/grid/Bayesian/Vizier/Optuna), comparators
+├── storage/        # experiment database / meta-dataset persistence
+├── api/            # inference service (configuration prediction)
+├── cli/            # command-line interface
+└── dashboard/      # experiment visualization, curves, feature importance
 ```
 
-**Responsabilités précises :**
+**Detailed responsibilities:**
 
-- `core` : types de configuration (`TrainingConfig`, `ModelFeatures`, `TaskFeatures`), traits `Trainable`, `Measurable`.
-- `model` : construction de modèles paramétrables (nombre de couches, largeur, activation) + introspection (comptage de paramètres, parcours des couches).
-- `taskgen` : fonctions génératrices, contrôle du bruit/complexité/redondance, échantillonnage reproductible (graines explicites).
-- `analysis` : calcul des signaux du §10 (normes, variance de gradient, cosinus successif, approximations de courbure via Hutchinson/power-iteration).
-- `initialization` : implémentations Xavier/He/orthogonale/scaled/µP + hook pour stratégies apprises.
-- `optimization` : SGD/Adam/AdamW/Lion, schedulers (cosine/step/exponentiel), warmup, clipping.
-- `meta` : entraînement et inférence du meta-modèle (features → configuration), interface avec un backend Python (gradient boosting) via FFI ou service séparé.
-- `experiments` : orchestration des runs (séquentiels ou parallèles), gestion des seeds, écriture dans l'*experiment database*.
-- `benchmark` : implémentations/wrappers des baselines (interfaçage Optuna en Python ; Vizier via API si accessible ; grid/random en Rust natif).
-- `storage` : schéma de données (§20-22), backend (voir stack §18 du prompt / stack technologique ci-dessous).
-- `api` : endpoint de prédiction (voir §30).
-- `cli` : commandes pour lancer une génération de tâches, un entraînement du laboratoire, une inférence de configuration.
-- `dashboard` : visualisation (courbes de loss, feature importance SHAP, comparaison de baselines).
+- `core`: configuration types (`TrainingConfig`, `ModelFeatures`, `TaskFeatures`), `Trainable`, `Measurable` traits.
+- `model`: construction of parametrizable models (number of layers, width, activation) + introspection (parameter counting, layer traversal).
+- `taskgen`: generative functions, control of noise/complexity/redundancy, reproducible sampling (explicit seeds).
+- `analysis`: computation of the §10 signals (norms, gradient variance, successive cosine, curvature approximations via Hutchinson/power-iteration).
+- `initialization`: Xavier/He/orthogonal/scaled/µP implementations + hook for learned strategies.
+- `optimization`: SGD/Adam/AdamW/Lion, schedulers (cosine/step/exponential), warmup, clipping.
+- `meta`: meta-model training and inference (features → configuration), interface with a Python backend (gradient boosting) via FFI or a separate service.
+- `experiments`: run orchestration (sequential or parallel), seed management, writing to the *experiment database*.
+- `benchmark`: baseline implementations/wrappers (Optuna interfacing in Python; Vizier via API if accessible; native Rust grid/random).
+- `storage`: data schema (§20-22), backend (see technology stack below).
+- `api`: prediction endpoint (see §30).
+- `cli`: commands to launch task generation, laboratory training, or configuration inference.
+- `dashboard`: visualization (loss curves, SHAP feature importance, baseline comparison).
 
 ---
 
 ## 20. Data Architecture
 
-Trois familles de données à modéliser :
+Three families of data to model:
 
-1. **Task Registry** — définition des tâches synthétiques générées (paramètres génératifs, seed, statistiques calculées).
-2. **Experiment Database** — un enregistrement par essai d'entraînement (voir §21).
-3. **Meta-Dataset** — vue agrégée de l'Experiment Database, structurée comme un jeu de données d'apprentissage supervisé pour le meta-modèle (voir §22).
+1. **Task Registry** — definition of the generated synthetic tasks (generative parameters, seed, computed statistics).
+2. **Experiment Database** — one record per training trial (see §21).
+3. **Meta-Dataset** — an aggregated view of the Experiment Database, structured as a supervised learning dataset for the meta-model (see §22).
 
-Flux :
+Flow:
 
 ```
 Task Registry ──┐
@@ -558,7 +559,7 @@ Model Registry ──┘                                  ▲                   
 
 ## 21. Experiment Database
 
-Schéma (par expérience) :
+Schema (per experiment):
 
 ```text
 experiment_id
@@ -573,132 +574,132 @@ init_method, weight_norm_stats, spectral_stats
 task_id, input_dim, noise_level, complexity_score, redundancy,
 n_samples, distribution_type, class_imbalance
 
-# Hyperparameters (= H, l'entrée testée)
+# Hyperparameters (= H, the tested input)
 learning_rate, optimizer, batch_size, weight_decay,
 warmup_steps, scheduler_type, gradient_clip
 
-# Dynamics (séries temporelles ou statistiques résumées)
+# Dynamics (time series or summary statistics)
 loss_curve[], grad_norm[], grad_cosine_similarity[],
 param_update_norm[], activation_stats[]
 
 # Compute
 flops, wall_clock_time, peak_memory, device
 
-# Outcome (= la vérité terrain à prédire)
+# Outcome (= the ground truth to predict)
 steps_to_threshold, samples_to_threshold, final_loss,
 final_accuracy, converged (bool), diverged (bool)
 ```
 
-Ce schéma sert à la fois de journal d'expérimentation (reproductibilité) et de source pour construire le meta-dataset.
+This schema serves both as an experiment log (reproducibility) and as a source for building the meta-dataset.
 
 ---
 
 ## 22. Meta-Dataset
 
-Vue dérivée de l'Experiment Database, une ligne = un couple (features pré-training, configuration testée, résultat) :
+A derived view of the Experiment Database, one row = one (pre-training features, tested configuration, result) tuple:
 
 $$
 \big(X_{model},\, X_{task},\, H\big) \;\longrightarrow\; \big(T_\epsilon,\, N_\epsilon,\, \mathrm{Accuracy}\big)
 $$
 
-Pour l'entraînement du meta-modèle **prédictif de \(H^*\)** (et non simplement prédictif du résultat d'un \(H\) donné), on retient pour chaque tâche/modèle la **meilleure configuration trouvée** par la recherche Bayesienne de référence (§8) comme cible :
+To train the meta-model **predictive of \(H^*\)** (rather than merely predictive of a given \(H\)'s outcome), for each task/model we keep the **best configuration found** by the reference Bayesian search (§8) as the target:
 
 $$
-\big(X_{model},\, X_{task}\big) \;\longrightarrow\; H^*_{trouvé\;par\;Vizier/Optuna}
+\big(X_{model},\, X_{task}\big) \;\longrightarrow\; H^*_{found\;by\;Vizier/Optuna}
 $$
 
-Deux formulations sont donc utiles et complémentaires : un modèle de **régression du résultat** (utile pour l'analyse causale, §15) et un modèle de **prédiction directe de la configuration optimale** (utile pour le produit final, §29-30).
+Two formulations are therefore useful and complementary: an **outcome regression** model (useful for causal analysis, §15) and a **direct optimal-configuration prediction** model (useful for the final product, §29-30).
 
 ---
 
 ## 23. Algorithms
 
-Algorithmes à implémenter/intégrer, par catégorie :
+Algorithms to implement/integrate, by category:
 
-- **Génération de tâches** : échantillonnage paramétrique reproductible (fonctions génératrices + bruit contrôlé).
-- **Recherche de référence (génération de vérité terrain)** : Bayesian optimization (TPE via Optuna, ou GP-based), Successive Halving/Hyperband pour accélérer la génération du meta-dataset à moindre coût.
-- **Extraction de features** : Hutchinson trace estimator (approx. de \(\mathrm{tr}(H)\)), power iteration (approx. de \(\lambda_{max}\) de la Hessienne ou du NTK), statistiques de poids/activations (moyenne, variance, norme, kurtosis).
-- **Meta-modèle** : gradient boosting (baseline), puis MLP/GNN en évolution (§14).
-- **Explication** : SHAP pour l'attribution de features.
-- **Optimisation causale** : plans factoriels, ANOVA, indices de Sobol (§15).
+- **Task generation**: reproducible parametric sampling (generative functions + controlled noise).
+- **Reference search (ground-truth generation)**: Bayesian optimization (TPE via Optuna, or GP-based), Successive Halving/Hyperband to accelerate meta-dataset generation at lower cost.
+- **Feature extraction**: Hutchinson trace estimator (approx. of \(\mathrm{tr}(H)\)), power iteration (approx. of \(\lambda_{max}\) of the Hessian or NTK), weight/activation statistics (mean, variance, norm, kurtosis).
+- **Meta-model**: gradient boosting (baseline), then MLP/GNN as it evolves (§14).
+- **Explanation**: SHAP for feature attribution.
+- **Causal optimization**: factorial designs, ANOVA, Sobol indices (§15).
 
 ---
 
 ## 24. Experimental Protocol
 
-| Phase | Objet | Hypothèse testée | Variables | Baseline | Critère de succès |
+| Phase | Subject | Hypothesis tested | Variables | Baseline | Success criterion |
 |---|---|---|---|---|---|
-| **1** | MLP + tâches synthétiques | H1, Q1-Q7 | LR, optimizer, batch, init, 5 hyperparamètres | Défauts standards (Adam LR=3e-4) | Meta-modèle bat la baseline sur ≥ 60 % des tâches de test synthétiques |
-| **2** | CNN + tâches synthétiques (images procédurales) | H1, H2 (généralisation à une autre famille d'archi) | + architecture (depth/width/kernel) | Idem + heuristiques CNN standards | Le meta-modèle entraîné en Phase 1 (ou ré-entraîné) transfère avec dégradation modérée |
-| **3** | Transformer miniature | H1, H2, µP comme référence | + attention config | µP + AdamW standard | Comparable ou meilleur que µP seul sur *steps-to-threshold* |
-| **4** | Datasets réels (petite échelle : ex. classification tabulaire/image simple) | H2, H3 | Idem + vraies statistiques de données | Vizier/Optuna avec budget équivalent | \(N_{ours} \le N_{baseline}\) et \(T_{ours} \le T_{baseline}\) à performance égale |
-| **5** | Modèles pré-entraînés (fine-tuning) | H2, H3 | LR/schedule de fine-tuning | Heuristiques de fine-tuning standards | Réduction mesurable du nombre de steps de fine-tuning à performance égale |
-| **6** | Modèles plus grands | H4, H5 (limites de scaling) | Budget de probing (0 % / 0.1 % / 1 %) | Phase 4/5 extrapolée naïvement | Identifier le point de rupture où la prédiction *zero-shot* devient insuffisante |
+| **1** | MLP + synthetic tasks | H1, Q1-Q7 | LR, optimizer, batch, init, 5 hyperparameters | Standard defaults (Adam LR=3e-4) | Meta-model beats the baseline on ≥ 60% of synthetic test tasks |
+| **2** | CNN + synthetic tasks (procedural images) | H1, H2 (generalization to another architecture family) | + architecture (depth/width/kernel) | Same + standard CNN heuristics | The meta-model trained in Phase 1 (or retrained) transfers with moderate degradation |
+| **3** | Miniature Transformer | H1, H2, µP as reference | + attention config | µP + standard AdamW | Comparable to or better than µP alone on *steps-to-threshold* |
+| **4** | Real datasets (small scale: e.g. tabular/simple-image classification) | H2, H3 | Same + real data statistics | Vizier/Optuna with an equivalent budget | \(N_{ours} \le N_{baseline}\) and \(T_{ours} \le T_{baseline}\) at equal performance |
+| **5** | Pre-trained models (fine-tuning) | H2, H3 | Fine-tuning LR/schedule | Standard fine-tuning heuristics | Measurable reduction in fine-tuning steps at equal performance |
+| **6** | Larger models | H4, H5 (scaling limits) | Probing budget (0% / 0.1% / 1%) | Naively extrapolated Phase 4/5 | Identify the breaking point where *zero-shot* prediction becomes insufficient |
 
-Chaque phase produit un rapport : hypothèse, résultat, hypothèse confirmée/infirmée/partielle, risques mis à jour.
+Each phase produces a report: hypothesis, result, hypothesis confirmed/refuted/partial, updated risks.
 
 ---
 
 ## 25. Baselines
 
-Comparaisons obligatoires, à chaque phase :
+Mandatory comparisons, at every phase:
 
-- hyperparamètres par défaut (ex. Adam LR=3e-4, pas de warmup) ;
-- réglage manuel par un ingénieur expérimenté (si possible, pour calibrer l'écart avec l'expertise humaine) ;
-- random search ;
-- grid search ;
-- Bayesian optimization (Optuna) ;
-- Google Vizier (si accès disponible) ;
-- Hyperband/ASHA ;
-- méthodes d'initialisation classiques seules (sans le reste du système), pour isoler la contribution de l'initialisation vs les autres hyperparamètres.
+- default hyperparameters (e.g. Adam LR=3e-4, no warmup);
+- manual tuning by an experienced engineer (if possible, to calibrate the gap with human expertise);
+- random search;
+- grid search;
+- Bayesian optimization (Optuna);
+- Google Vizier (if access is available);
+- Hyperband/ASHA;
+- classic initialization methods alone (without the rest of the system), to isolate initialization's contribution from the other hyperparameters.
 
-**Règle de décision.** PreTrainOpt n'est considéré « performant » sur une phase que s'il domine (ou égale à coût très inférieur) la meilleure baseline **à budget de calcul comparable ou inférieur**.
+**Decision rule.** PreTrainOpt is considered "performant" on a phase only if it dominates (or matches at a much lower cost) the best baseline **at a comparable or lower compute budget**.
 
 ---
 
 ## 26. Ablation Studies
 
 ```
-Système complet
-  − sans initialization predictor
-  − sans task features
-  − sans model features
-  − sans gradient/curvature features
-  − sans meta-learning (retour à Bayesian opt pur)
-  − sans tâches synthétiques (entraînement direct sur peu de données réelles)
-  − sans probing court (zero-shot pur)
+Full system
+  − without initialization predictor
+  − without task features
+  − without model features
+  − without gradient/curvature features
+  − without meta-learning (back to pure Bayesian opt)
+  − without synthetic tasks (direct training on little real data)
+  − without short probing (pure zero-shot)
 ```
 
-Pour chaque variante : mesurer la dégradation sur les métriques du §27. Objectif : identifier **quelle composante porte réellement la valeur** — condition nécessaire pour prioriser les efforts d'ingénierie (V0.3 vs V0.4, etc.) et pour toute publication scientifique crédible.
+For each variant: measure the degradation on the §27 metrics. Goal: identify **which component actually carries the value** — a necessary condition for prioritizing engineering effort (V0.3 vs V0.4, etc.) and for any credible scientific publication.
 
 ---
 
 ## 27. Evaluation Metrics
 
-- **StepsToThreshold** \(T_\epsilon\) — sensible au choix de \(\epsilon\), à définir par tâche relativement à la loss d'un modèle bien entraîné.
-- **SamplesToThreshold** \(N_\epsilon\) — capture la sample efficiency indépendamment de la vitesse de calcul.
-- **ComputeToThreshold** \(C_\epsilon\) — FLOPs, comparable indépendamment du matériel.
-- **AreaUnderLearningCurve** — résume toute la trajectoire, robuste aux seuils arbitraires mais moins interprétable directement.
-- **Prediction accuracy du meta-modèle** — écart entre \(H^*\) prédit et \(H^*\) réel (trouvé par recherche exhaustive), et écart de performance entre les deux configurations.
-- **Confidence calibration** — le score de confiance retourné par le système correspond-il à la fréquence réelle de succès (fiabilité de l'incertitude, essentielle en production, §29) ?
+- **StepsToThreshold** \(T_\epsilon\) — sensitive to the choice of \(\epsilon\), to be defined per task relative to a well-trained model's loss.
+- **SamplesToThreshold** \(N_\epsilon\) — captures sample efficiency independently of compute speed.
+- **ComputeToThreshold** \(C_\epsilon\) — FLOPs, comparable independently of hardware.
+- **AreaUnderLearningCurve** — summarizes the whole trajectory, robust to arbitrary thresholds but less directly interpretable.
+- **Meta-model prediction accuracy** — gap between the predicted \(H^*\) and the real \(H^*\) (found by exhaustive search), and the performance gap between the two configurations.
+- **Confidence calibration** — does the system's returned confidence score match the real success frequency (uncertainty reliability, essential in production, §29)?
 
-**Avantages/limites.** \(T_\epsilon\) et \(N_\epsilon\) sont intuitifs mais dépendent du seuil choisi ; l'AUC est plus robuste mais agrège des phases d'entraînement de nature différente (transitoire rapide vs affinage lent) — les deux familles de métriques doivent être rapportées conjointement.
+**Advantages/limits.** \(T_\epsilon\) and \(N_\epsilon\) are intuitive but depend on the chosen threshold; AUC is more robust but aggregates training phases of different natures (fast transient vs. slow fine-tuning) — both metric families should be reported together.
 
 ---
 
 ## 28. Statistical Analysis
 
-- **Réplication obligatoire** — chaque expérience (surtout en Phase 1-3, peu coûteuses) répétée sur ≥ 5 graines aléatoires ; rapporter moyenne **et** dispersion (écart-type, intervalles de confiance).
-- **Tests de significativité** — comparaison de baselines via tests appropriés (ex. test de Wilcoxon apparié plutôt qu'un simple delta de moyenne, pour tenir compte de la variance inter-graines).
-- **ANOVA / Sobol** — décomposition de variance pour les plans factoriels (§15).
-- **Correction pour comparaisons multiples** — dès lors que de nombreux hyperparamètres/tâches sont comparés simultanément (ex. correction de Bonferroni ou False Discovery Rate) pour éviter les faux positifs.
-- **Rapport de feature importance (SHAP)** — systématique sur chaque version du meta-modèle, versionné avec le modèle correspondant.
+- **Mandatory replication** — every experiment (especially in cheap Phases 1-3) repeated over ≥ 5 random seeds; report both mean **and** dispersion (standard deviation, confidence intervals).
+- **Significance testing** — baseline comparisons via appropriate tests (e.g. a paired Wilcoxon test rather than a simple mean delta, to account for inter-seed variance).
+- **ANOVA / Sobol** — variance decomposition for factorial designs (§15).
+- **Multiple-comparison correction** — whenever many hyperparameters/tasks are compared simultaneously (e.g. Bonferroni correction or False Discovery Rate) to avoid false positives.
+- **Feature importance report (SHAP)** — systematic on every meta-model version, versioned alongside the corresponding model.
 
 ---
 
 ## 29. Production Architecture
 
-Le service reçoit :
+The service receives:
 
 ```json
 {
@@ -710,7 +711,7 @@ Le service reçoit :
 }
 ```
 
-et retourne :
+and returns:
 
 ```json
 {
@@ -724,265 +725,265 @@ et retourne :
 }
 ```
 
-Le **score de confiance** est une exigence de premier ordre : un système qui ne sait pas dire *quand il ne sait pas* est dangereux à intégrer dans un pipeline de production. Approche recommandée : quantile regression ou ensembles de meta-modèles (variance inter-modèles comme proxy d'incertitude).
+The **confidence score** is a first-order requirement: a system that doesn't know *when it doesn't know* is dangerous to integrate into a production pipeline. Recommended approach: quantile regression or meta-model ensembles (inter-model variance as an uncertainty proxy).
 
 ---
 
 ## 30. API Design
 
-- `POST /v1/analyze-model` — introspection d'un modèle fourni (checkpoint vierge ou définition d'architecture), retourne \(X_{model}\).
-- `POST /v1/analyze-task` — statistiques calculées sur un échantillon de données/tâche, retourne \(X_{task}\).
-- `POST /v1/predict-config` — entrée \(X_{model}, X_{task}\) (+ budget, métrique cible) → configuration recommandée + confiance.
-- `POST /v1/probe` — lance un *few-step probing* optionnel et retourne une configuration affinée.
-- `POST /v1/feedback` — soumission du résultat réel d'un entraînement complet, alimente le meta-dataset (§23 boucle de feedback).
-- `GET /v1/experiments/{id}` — consultation d'une expérience journalisée.
+- `POST /v1/analyze-model` — introspects a supplied model (blank checkpoint or architecture definition), returns \(X_{model}\).
+- `POST /v1/analyze-task` — statistics computed on a data/task sample, returns \(X_{task}\).
+- `POST /v1/predict-config` — input \(X_{model}, X_{task}\) (+ budget, target metric) → recommended configuration + confidence.
+- `POST /v1/probe` — launches an optional *few-step probing* run and returns a refined configuration.
+- `POST /v1/feedback` — submits the real outcome of a full training run, feeds the meta-dataset (§23 feedback loop).
+- `GET /v1/experiments/{id}` — consults a logged experiment.
 
-Design REST simple en V1 ; gRPC envisageable en V2 si l'intégration dans des pipelines d'entraînement à faible latence le justifie.
+Simple REST design in V1; gRPC conceivable in V2 if integration into low-latency training pipelines justifies it.
 
 ---
 
 ## 31. MLOps
 
-- **Versionnement** : du meta-modèle (avec ses métriques de validation), du meta-dataset (snapshot daté), du code (SemVer).
-- **CI/CD** : tests de non-régression sur un sous-ensemble fixe de tâches synthétiques (« benchmark de fumée ») avant chaque déploiement du meta-modèle.
-- **Monitoring** : suivi en production de l'écart prédiction/réalité (dérive du modèle), alerte si la calibration de confiance se dégrade.
-- **Ré-entraînement périodique** : pipeline automatisé déclenché quand le volume de nouveaux feedbacks dépasse un seuil (continual meta-learning, §23).
-- **Reproductibilité** : graines aléatoires explicites, capture de l'environnement (versions de libs, matériel) pour chaque expérience.
+- **Versioning**: of the meta-model (with its validation metrics), of the meta-dataset (dated snapshot), of the code (SemVer).
+- **CI/CD**: regression tests on a fixed subset of synthetic tasks ("smoke benchmark") before every meta-model deployment.
+- **Monitoring**: production tracking of the prediction/reality gap (model drift), alerting if confidence calibration degrades.
+- **Periodic retraining**: automated pipeline triggered when the volume of new feedback exceeds a threshold (continual meta-learning, §23).
+- **Reproducibility**: explicit random seeds, environment capture (library versions, hardware) for every experiment.
 
 ---
 
 ## 32. Distributed Computing
 
-Le laboratoire synthétique doit pouvoir exécuter **des milliers d'entraînements courts en parallèle** — un problème d'*embarrassingly parallel batch scheduling* plutôt que de distributed training classique (un seul entraînement sur plusieurs GPU).
+The synthetic laboratory must be able to run **thousands of short training runs in parallel** — an *embarrassingly parallel batch scheduling* problem rather than classic distributed training (a single training run across multiple GPUs).
 
-- **Orchestration** : Kubernetes (ou Ray pour une option plus légère et native ML) pour distribuer les runs du laboratoire sur un pool de workers CPU/GPU.
-- **Stockage partagé** : object storage (S3-compatible) pour les checkpoints et logs bruts ; base de données structurée pour l'Experiment Database.
-- **Scheduling adaptatif** : privilégier ASHA/Hyperband pour arrêter tôt les tâches synthétiques peu informatives et réallouer le budget de calcul.
+- **Orchestration**: Kubernetes (or Ray for a lighter, ML-native option) to distribute the laboratory's runs across a pool of CPU/GPU workers.
+- **Shared storage**: object storage (S3-compatible) for checkpoints and raw logs; a structured database for the Experiment Database.
+- **Adaptive scheduling**: favor ASHA/Hyperband to stop uninformative synthetic tasks early and reallocate compute budget.
 
-Ce composant n'est nécessaire qu'à partir du moment où le volume d'expériences dépasse la capacité d'une seule machine (typiquement V0.3-V0.4, pas pour le MVP).
+This component is only needed once the volume of experiments exceeds the capacity of a single machine (typically V0.3-V0.4, not for the MVP).
 
 ---
 
 ## 33. Security / Reliability
 
-- **Isolation des runs** — chaque entraînement du laboratoire dans un environnement isolé (conteneur), pour éviter qu'une divergence numérique (NaN, explosion mémoire) n'affecte les autres runs.
-- **Détection de divergence** — arrêt automatique des runs qui produisent des NaN/Inf ou dépassent un budget mémoire/temps, avec journalisation de l'échec comme donnée utile (un échec est une information, pas un simple rejet).
-- **Validation des entrées API** — bornage des budgets de calcul demandés côté production, pour éviter qu'une requête ne déclenche un probing disproportionné.
-- **Traçabilité** — chaque prédiction en production doit être reliée à la version exacte du meta-modèle et du meta-dataset qui l'ont produite (auditabilité).
+- **Run isolation** — each laboratory training run in an isolated environment (container), to prevent a numerical divergence (NaN, memory explosion) from affecting other runs.
+- **Divergence detection** — automatic termination of runs that produce NaN/Inf or exceed a memory/time budget, with the failure logged as useful data (a failure is information, not just a rejection).
+- **API input validation** — bounding requested compute budgets on the production side, to prevent a request from triggering disproportionate probing.
+- **Traceability** — every production prediction must be linked to the exact meta-model and meta-dataset version that produced it (auditability).
 
 ---
 
 ## 34. Failure Modes
 
-| Mode d'échec | Symptôme | Détection | Mitigation |
+| Failure mode | Symptom | Detection | Mitigation |
 |---|---|---|---|
-| Divergence numérique pendant un run du laboratoire | Loss = NaN | Monitoring automatique | Arrêt + log comme échec informatif |
-| Meta-modèle en sur-apprentissage sur les tâches synthétiques | Bonnes perfs en test synthétique, mauvaises sur données réelles | Split train/val/test strict + validation externe (Phase 4+) | Régularisation, augmentation de la diversité des tâches synthétiques |
-| Dérive de distribution en production | Confiance élevée mais résultats réels dégradés | Boucle de feedback (§23) + monitoring de calibration | Ré-entraînement périodique, alerte automatique |
-| Coût de calcul du laboratoire sous-estimé | Budget explosé avant d'atteindre un meta-dataset exploitable | Suivi budgétaire par phase | Prioriser Hyperband/ASHA, réduire le nombre de graines en phase exploratoire |
-| Features chères (NTK, Hessienne complète) trop coûteuses pour être utiles en production | Latence API inacceptable | Benchmark de latence par feature | Ne garder en production que les features validées comme *rentables* (§26 ablation) |
+| Numerical divergence during a laboratory run | Loss = NaN | Automated monitoring | Stop + log as an informative failure |
+| Meta-model overfitting on synthetic tasks | Good synthetic test performance, poor on real data | Strict train/val/test split + external validation (Phase 4+) | Regularization, increase synthetic task diversity |
+| Distribution drift in production | High confidence but degraded real results | Feedback loop (§23) + calibration monitoring | Periodic retraining, automated alerting |
+| Underestimated laboratory compute cost | Budget exhausted before reaching a usable meta-dataset | Per-phase budget tracking | Prioritize Hyperband/ASHA, reduce the number of seeds in the exploratory phase |
+| Expensive features (NTK, full Hessian) too costly to be useful in production | Unacceptable API latency | Per-feature latency benchmark | Only keep in production the features validated as *worth it* (§26 ablation) |
 
 ---
 
 ## 35. Research Risks
 
-| Risque | Description | Expérience pour le tester |
+| Risk | Description | Experiment to test it |
 |---|---|---|
-| Optimalité fortement dépendante du dataset | \(H^*\) varie trop d'une tâche à l'autre pour être généralisable | Mesurer la variance de \(H^*\) à travers des tâches synthétiques *proches* (même famille, paramètres voisins) |
-| Mauvaise transférabilité synthétique → réel | Le meta-modèle entraîné sur synthétique ne généralise pas | Phase 4 : validation externe stricte, hold-out de tâches réelles jamais vues |
-| Espace d'architectures trop vaste | Impossible de couvrir suffisamment de diversité architecturale | Limiter le scope initial (MLP → CNN → Transformer miniature), mesurer la dégradation par famille |
-| Impossibilité de prédire précisément la convergence | Le signal pré-training est trop faible | Étude de feature importance (Q8) tôt, avec seuil d'abandon défini à l'avance |
-| Coût des features (NTK, Hessienne) prohibitif | Le système coûte presque autant que ce qu'il économise | Benchmark de coût vs valeur ajoutée par feature (ablation §26) |
-| Distribution shift entre phase de recherche et production | Les tâches réelles diffèrent trop du laboratoire synthétique | Élargir progressivement la diversité du générateur de tâches |
-| Meta-overfitting | Le meta-modèle mémorise les tâches du meta-dataset plutôt que d'apprendre une relation généralisable | Validation croisée stricte à l'échelle des *tâches* (pas des essais), tâches de test totalement disjointes |
-| Hyperparamètres non stationnaires | La configuration optimale change au cours de l'entraînement lui-même (justifie schedules) | Comparer prédiction statique vs schedule prédit dynamiquement |
-| Absence de relation universelle architecture ↔ configuration optimale | H1 est simplement fausse | C'est le risque central du projet — testé dès la Phase 1 avec un seuil d'abandon/pivot explicite |
+| Optimality strongly dataset-dependent | \(H^*\) varies too much from one task to another to be generalizable | Measure the variance of \(H^*\) across *nearby* synthetic tasks (same family, neighboring parameters) |
+| Poor synthetic → real transferability | The meta-model trained on synthetic data doesn't generalize | Phase 4: strict external validation, hold-out of never-seen real tasks |
+| Architecture space too vast | Impossible to cover enough architectural diversity | Limit the initial scope (MLP → CNN → miniature Transformer), measure degradation per family |
+| Inability to precisely predict convergence | The pre-training signal is too weak | Early feature-importance study (Q8), with a pre-defined abandonment threshold |
+| Prohibitive feature cost (NTK, Hessian) | The system costs almost as much as it saves | Cost-vs-added-value benchmark per feature (ablation §26) |
+| Distribution shift between research phase and production | Real tasks differ too much from the synthetic laboratory | Progressively widen the task generator's diversity |
+| Meta-overfitting | The meta-model memorizes the meta-dataset's tasks rather than learning a generalizable relationship | Strict cross-validation at the *task* level (not the trial level), fully disjoint test tasks |
+| Non-stationary hyperparameters | The optimal configuration changes over the course of training itself (justifies schedules) | Compare a static prediction vs. a dynamically predicted schedule |
+| No universal architecture ↔ optimal-configuration relationship | H1 is simply false | This is the project's central risk — tested from Phase 1 with an explicit abandonment/pivot threshold |
 
-**Principe directeur.** Chaque risque a une expérience assignée dans le protocole (§24) — aucun risque ne reste « à explorer plus tard » sans un test concret prévu.
+**Guiding principle.** Every risk has an assigned experiment in the protocol (§24) — no risk remains "to explore later" without a concrete planned test.
 
 ---
 
 ## 36. Open Research Questions
 
-Au-delà du scope initial, pistes à garder en réserve, chacune évaluée pour sa pertinence :
+Beyond the initial scope, leads to keep in reserve, each assessed for relevance:
 
-| Concept | Explication courte | Lien avec le projet | À intégrer ? | Expérience proposée |
+| Concept | Short explanation | Link to the project | Integrate? | Proposed experiment |
 |---|---|---|---|---|
-| **Learned initialization** | Apprendre directement une fonction qui génère les poids initiaux | Extension directe de §12 | Oui, V0.3+ | Comparer init apprise vs µP vs He sur Phase 2-3 |
-| **Learned optimizers** | Remplacer la règle de mise à jour elle-même par un modèle appris | Orthogonal, plus ambitieux | Non prioritaire | Piste séparée, à isoler du cœur du projet |
-| **Neural scaling laws** | Lois puissance liant taille/données/compute à la loss | Inspiration méthodologique | Oui, en arrière-plan (Phase 6) | Vérifier si nos prédictions restent valables à travers les échelles |
-| **Neural Tangent Kernel** | Cf. §9 | Feature candidate directe | Oui | Comparer spectre NTK approximé comme feature vs sans |
-| **Loss landscape geometry / dynamical isometry** | Propriétés globales/locales de la surface de loss | Lié à §9 (Hessienne) | Oui, comme feature | Tester corrélation sharpness ↔ généralisation dans le laboratoire |
-| **Spectral initialization** | Initialisation calibrée sur le spectre attendu des activations/gradients | Extension de §12 | Oui | Comparer à Xavier/He |
-| **Gradient flow** | Analyse continue (EDO) de la dynamique de descente de gradient | Fondation théorique | En arrière-plan seulement | — |
-| **Fisher information** | Cf. §9 | Feature candidate (lien avec K-FAC) | Oui, V0.4+ | Comparer coût/valeur vs Hessienne approximée |
-| **Grokking** | Généralisation tardive et soudaine après une longue phase de mémorisation apparente | Cas limite intéressant pour tester la robustesse des prédictions de \(T_\epsilon\) | Oui, comme étude de cas | Tâches synthétiques connues pour produire du grokking (arithmétique modulaire) |
-| **Lottery ticket hypothesis** | Sous-réseaux entraînables isolables dès l'initialisation | Lien indirect avec « qualité d'initialisation » | Exploratoire | Tester si les features d'un « bon » sous-réseau prédisent aussi un bon \(H^*\) |
-| **Pruning / distillation** | Réduction de modèle post ou pendant training | Périphérique | Non prioritaire | — |
-| **Curriculum learning** | Cf. doc. source #1 | Déjà dans la taxonomie données (§11) | Oui | Comparer ordre naïf vs curriculum sur tâches synthétiques à difficulté paramétrable |
-| **Active learning / data selection / dataset valuation** | Sélectionner quelles données entraîner en premier/en priorité | Lien avec sample efficiency (§17) | Oui, V0.5+ (données réelles) | Comparer sélection aléatoire vs sélection guidée par le meta-modèle |
-| **Synthetic data generation (au-delà du laboratoire)** | Générer des données d'entraînement synthétiques pour la tâche cible elle-même (pas seulement pour la recherche méta) | Distinct du Synthetic Learning Laboratory | Piste séparée | — |
-| **Neural Architecture Search** | Recherche automatique d'architecture | Orthogonal (on suppose l'architecture donnée) | Non — hors scope explicite | — |
-| **Learned HPO (meta-apprentissage de l'algorithme de recherche lui-même)** | Aller un cran plus loin que notre meta-prédicteur | Vision long terme | Recherche exploratoire V2.0 | — |
+| **Learned initialization** | Directly learn a function that generates the initial weights | Direct extension of §12 | Yes, V0.3+ | Compare learned init vs. µP vs. He in Phase 2-3 |
+| **Learned optimizers** | Replace the update rule itself with a learned model | Orthogonal, more ambitious | Not a priority | Separate track, isolated from the project's core |
+| **Neural scaling laws** | Power laws relating size/data/compute to loss | Methodological inspiration | Yes, in the background (Phase 6) | Check whether our predictions remain valid across scales |
+| **Neural Tangent Kernel** | See §9 | Direct candidate feature | Yes | Compare an approximated NTK spectrum as a feature vs. without |
+| **Loss landscape geometry / dynamical isometry** | Global/local properties of the loss surface | Linked to §9 (Hessian) | Yes, as a feature | Test the sharpness ↔ generalization correlation in the laboratory |
+| **Spectral initialization** | Initialization calibrated on the expected activation/gradient spectrum | Extension of §12 | Yes | Compare against Xavier/He |
+| **Gradient flow** | Continuous (ODE) analysis of gradient-descent dynamics | Theoretical foundation | Background only | — |
+| **Fisher information** | See §9 | Candidate feature (link to K-FAC) | Yes, V0.4+ | Compare cost/value vs. approximated Hessian |
+| **Grokking** | Late, sudden generalization after a long apparent-memorization phase | Interesting edge case to test the robustness of \(T_\epsilon\) predictions | Yes, as a case study | Synthetic tasks known to produce grokking (modular arithmetic) |
+| **Lottery ticket hypothesis** | Trainable sub-networks isolable right at initialization | Indirect link to "initialization quality" | Exploratory | Test whether a "good" sub-network's features also predict a good \(H^*\) |
+| **Pruning / distillation** | Model reduction during or after training | Peripheral | Not a priority | — |
+| **Curriculum learning** | See source doc #1 | Already in the data taxonomy (§11) | Yes | Compare naive ordering vs. curriculum on synthetic tasks with parametric difficulty |
+| **Active learning / data selection / dataset valuation** | Select which data to train on first/with priority | Link to sample efficiency (§17) | Yes, V0.5+ (real data) | Compare random selection vs. meta-model-guided selection |
+| **Synthetic data generation (beyond the laboratory)** | Generate synthetic training data for the target task itself (not just for meta-research) | Distinct from the Synthetic Learning Laboratory | Separate track | — |
+| **Neural Architecture Search** | Automated architecture search | Orthogonal (we assume the architecture is given) | No — explicitly out of scope | — |
+| **Learned HPO (meta-learning the search algorithm itself)** | Going one step further than our meta-predictor | Long-term vision | Exploratory research, V2.0 | — |
 
 ---
 
-## 37. Positionnement Scientifique
+## 37. Scientific Positioning
 
-Domaines de recherche concernés :
+Relevant research fields:
 
-- **AutoML** (Automated Machine Learning) — cadre général.
-- **Hyperparameter Optimization** — le champ le plus proche historiquement, mais notre approche diffère par la prédiction *a priori* plutôt que la recherche.
-- **Meta-Learning** — cœur méthodologique (apprendre à travers les tâches).
-- **Optimization Theory** — fondations (NTK, Hessienne, µP).
-- **Training Dynamics** — objet d'étude empirique central.
-- **Neural Architecture Search** — voisin, explicitement hors scope initial.
-- **Efficient Deep Learning** — motivation (réduire coût/données/énergie).
-- **Sample-Efficient Learning** — un des deux axes de métrique principaux (avec la vitesse).
-- **AI Systems** — dimension ingénierie/infrastructure du projet.
+- **AutoML** (Automated Machine Learning) — the general framework.
+- **Hyperparameter Optimization** — the historically closest field, but our approach differs by predicting *a priori* rather than searching.
+- **Meta-Learning** — the methodological core (learning across tasks).
+- **Optimization Theory** — foundations (NTK, Hessian, µP).
+- **Training Dynamics** — the central object of empirical study.
+- **Neural Architecture Search** — a neighbor, explicitly out of initial scope.
+- **Efficient Deep Learning** — motivation (reducing cost/data/energy).
+- **Sample-Efficient Learning** — one of the two main metric axes (with speed).
+- **AI Systems** — the project's engineering/infrastructure dimension.
 
-**Contribution potentielle.** À l'intersection de la Training Dynamics (habituellement étudiée de façon descriptive/post-hoc) et du Meta-Learning appliqué au HPO (habituellement traité comme boîte noire) : un système qui relie explicitement des **propriétés structurelles pré-entraînement** à des **prédictions de dynamique**, validé par une méthodologie **causale** plutôt que purement corrélationnelle.
+**Potential contribution.** At the intersection of Training Dynamics (usually studied descriptively/post-hoc) and Meta-Learning applied to HPO (usually treated as a black box): a system that explicitly links **pre-training structural properties** to **dynamics predictions**, validated through a **causal** methodology rather than a purely correlational one.
 
 ---
 
 ## 38. Roadmap
 
-| Version | Contenu | Expériences | Critères de réussite | Difficulté | Risques principaux |
+| Version | Content | Experiments | Success criteria | Difficulty | Main risks |
 |---|---|---|---|---|---|
-| **MVP** | Laboratoire MLP + 5 hyperparamètres + recherche Bayesienne de référence | Phase 1 partielle | Meta-dataset de ≥ 1000 essais cohérent et exploitable | Faible-Moyenne | Sous-estimation du coût de calcul |
-| **V0.1** | Synthetic Learning Laboratory complet (fonctions génératrices paramétriques, contrôle bruit/complexité/redondance) | Génération de ≥ 100 tâches | Diversité de tâches suffisante (vérifiée par clustering des features de tâche) | Moyenne | Générateur trop peu diversifié |
-| **V0.2** | Hyperparameter predictor (gradient boosting) | Phase 1 complète | Bat la baseline par défaut sur ≥ 60 % des tâches test | Moyenne | H1 insuffisamment vérifiée |
-| **V0.3** | Initialization predictor + features de courbure (Hutchinson, power iteration) | Ablation §26 partielle | Gain mesurable attribuable spécifiquement à l'initialisation prédite | Moyenne-Élevée | Coût de calcul des features de courbure |
-| **V0.4** | Extension CNN/Transformer miniature | Phase 2-3 | Transfert du meta-modèle avec dégradation « acceptable » (seuil à définir a priori) | Élevée | Espace d'architecture trop large |
-| **V0.5** | Datasets réels | Phase 4 | \(N_{ours} \le N_{baseline}\), \(T_{ours} \le T_{baseline}\) à performance égale | Élevée | Mauvaise transférabilité synthétique→réel (risque central) |
-| **V1.0** | API de production (§29-30) + score de confiance calibré | Validation de calibration | Confiance corrélée à la fréquence réelle de succès | Élevée | Latence, fiabilité en conditions réelles |
-| **V2.0** | Meta-learning à grande échelle (GNN sur architectures, boucle de feedback continue) | Phase 5-6 | Amélioration continue mesurable au fil des feedbacks de production | Très élevée | Meta-overfitting, dérive |
+| **MVP** | MLP laboratory + 5 hyperparameters + reference Bayesian search | Partial Phase 1 | A coherent, usable meta-dataset of ≥ 1000 trials | Low-Medium | Underestimated compute cost |
+| **V0.1** | Full Synthetic Learning Laboratory (parametric generative functions, noise/complexity/redundancy control) | Generation of ≥ 100 tasks | Sufficient task diversity (verified via task-feature clustering) | Medium | Insufficiently diverse generator |
+| **V0.2** | Hyperparameter predictor (gradient boosting) | Full Phase 1 | Beats the default baseline on ≥ 60% of test tasks | Medium | H1 insufficiently verified |
+| **V0.3** | Initialization predictor + curvature features (Hutchinson, power iteration) | Partial §26 ablation | Measurable gain specifically attributable to the predicted initialization | Medium-High | Compute cost of curvature features |
+| **V0.4** | CNN/miniature Transformer extension | Phase 2-3 | Meta-model transfers with "acceptable" degradation (threshold defined a priori) | High | Architecture space too broad |
+| **V0.5** | Real datasets | Phase 4 | \(N_{ours} \le N_{baseline}\), \(T_{ours} \le T_{baseline}\) at equal performance | High | Poor synthetic→real transferability (central risk) |
+| **V1.0** | Production API (§29-30) + calibrated confidence score | Calibration validation | Confidence correlated with real success frequency | High | Latency, real-world reliability |
+| **V2.0** | Large-scale meta-learning (GNN over architectures, continuous feedback loop) | Phase 5-6 | Measurable continuous improvement from production feedback | Very high | Meta-overfitting, drift |
 
 ---
 
-## 39. MVP — Détail
+## 39. MVP — Details
 
-Le MVP doit rester **volontairement petit** :
+The MVP must remain **deliberately small**:
 
 ```
 MLP
   ↓
-Tâches synthétiques de régression (3-5 fonctions génératrices)
+Synthetic regression tasks (3-5 generative functions)
   ↓
-5 hyperparamètres (learning_rate, batch_size, optimizer, weight_decay, initialization)
+5 hyperparameters (learning_rate, batch_size, optimizer, weight_decay, initialization)
   ↓
-~1000 configurations testées (recherche Bayesienne de référence, via Optuna)
+~1000 configurations tested (reference Bayesian search, via Optuna)
   ↓
-Mesure de convergence (steps_to_threshold)
+Convergence measurement (steps_to_threshold)
   ↓
-Constitution du meta-dataset
+Meta-dataset construction
   ↓
-Premier modèle prédictif (gradient boosting)
+First predictive model (gradient boosting)
 ```
 
-**Sortie attendue du MVP :** une réponse chiffrée, même négative, à la première hypothèse (H1) sur un scope restreint — pas un produit utilisable.
+**Expected MVP output:** a quantified answer, even a negative one, to the first hypothesis (H1) on a restricted scope — not a usable product.
 
 ---
 
 ## 40. Future Extensions
 
-- Extension à des familles d'architecture supplémentaires (RNN/SSM, GNN, modèles multimodaux).
-- Prédiction de configurations de *fine-tuning* pour LLM (LoRA/PEFT — rang, learning rate d'adaptateur) comme cas d'usage à forte valeur pratique.
-- Intégration d'un budget de probing adaptatif (le système décide lui-même s'il a besoin de plus de signal avant de répondre, plutôt qu'un budget fixe).
-- Marketplace de « profils de convergence » — bibliothèque de configurations validées par famille de tâches, alimentée par la communauté (piste open-source, §42).
+- Extension to additional architecture families (RNN/SSM, GNN, multimodal models).
+- Prediction of LLM *fine-tuning* configurations (LoRA/PEFT — rank, adapter learning rate) as a high-value practical use case.
+- Integration of an adaptive probing budget (the system itself decides whether it needs more signal before answering, rather than a fixed budget).
+- A "convergence profile" marketplace — a library of validated configurations per task family, fed by the community (open-source track, §43).
 
 ---
 
 ## 41. Potential Scientific Contributions
 
-- Un **Synthetic Learning Laboratory** open-source, réutilisable indépendamment du succès de l'hypothèse centrale (contribution méthodologique en soi).
-- Une **Experiment/Meta-Database** publique de dynamiques d'entraînement contrôlées, utile à la communauté training-dynamics au-delà de PreTrainOpt.
-- Une évaluation empirique rigoureuse (causale, pas seulement corrélationnelle) de l'importance relative des facteurs pré-training sur la convergence — publiable indépendamment du succès du produit final.
-- Si H1-H3 sont validées : un article démontrant qu'un meta-prédicteur bat les baselines HPO standards à budget de calcul très inférieur.
+- An open-source **Synthetic Learning Laboratory**, reusable independently of the central hypothesis's success (a methodological contribution in its own right).
+- A public **Experiment/Meta-Database** of controlled training dynamics, useful to the training-dynamics community beyond PreTrainOpt.
+- A rigorous (causal, not merely correlational) empirical evaluation of the relative importance of pre-training factors on convergence — publishable independently of the final product's success.
+- If H1-H3 are validated: a paper demonstrating that a meta-predictor beats standard HPO baselines at a far lower compute budget.
 
 ---
 
 ## 42. Potential Industrial Applications
 
-- Réduction du coût de *tuning* pour les équipes ML sans expertise HPO poussée (démocratisation).
-- Accélération du fine-tuning de LLM en production (cas d'usage à forte valeur, coût d'expérimentation élevé chez les praticiens).
-- Intégration en amont des plateformes MLOps existantes (Kubeflow, SageMaker, Vertex AI) comme étape de recommandation avant lancement d'un job d'entraînement.
-- Réduction de l'empreinte énergétique de l'entraînement de modèles (argument ESG concret si \(E_\epsilon\) est effectivement réduit).
+- Reduced tuning cost for ML teams without deep HPO expertise (democratization).
+- Accelerated LLM fine-tuning in production (a high-value use case, with high experimentation cost for practitioners).
+- Upstream integration into existing MLOps platforms (Kubeflow, SageMaker, Vertex AI) as a recommendation step before launching a training job.
+- Reduced energy footprint of model training (a concrete ESG argument if \(E_\epsilon\) is indeed reduced).
 
 ---
 
 ## 43. Open-source Strategy
 
-- Le **Synthetic Learning Laboratory** (générateur de tâches) et l'**Experiment Database** publiés en open-source dès la V0.1 — construisent la crédibilité scientifique et attirent des contributions externes (nouvelles familles de tâches, nouvelles architectures).
-- Le **meta-modèle entraîné** et l'**API de prédiction** peuvent rester propriétaires (différenciation produit) même si le code du laboratoire est ouvert — modèle « open-core » classique.
-- Publication d'un article (workshop puis conférence) dès que Phase 1-2 produisent un résultat solide, pour asseoir la légitimité scientifique avant la phase produit.
+- The **Synthetic Learning Laboratory** (task generator) and the **Experiment Database** published as open source starting at V0.1 — building scientific credibility and attracting external contributions (new task families, new architectures).
+- The **trained meta-model** and the **prediction API** can remain proprietary (product differentiation) even if the laboratory's code is open — a classic "open-core" model.
+- Publication of a paper (workshop, then conference) as soon as Phase 1-2 produce a solid result, to establish scientific legitimacy before the product phase.
 
 ---
 
 ## 44. Product Strategy
 
-- **Phase recherche (V0.x)** : pas de produit, publication et crédibilité scientifique comme objectif.
-- **Phase early access (V1.0)** : API restreinte à quelques utilisateurs pilotes (équipes ML internes ou partenaires), pour valider H3 (le rapport coût/bénéfice) en conditions réelles.
-- **Phase produit (V1.0+)** : SaaS d'API de recommandation de configuration, intégrable dans les pipelines d'entraînement existants ; tarification indexée sur le compute économisé (modèle « value-based pricing » cohérent avec la proposition de valeur).
-- **Phase infrastructure enterprise (V2.0)** : déploiement on-premise pour les organisations dont les contraintes de confidentialité empêchent l'usage d'une API externe (pertinent notamment pour les grands modèles propriétaires).
+- **Research phase (V0.x)**: no product, publication and scientific credibility as the goal.
+- **Early access phase (V1.0)**: API restricted to a few pilot users (internal ML teams or partners), to validate H3 (the cost/benefit ratio) under real conditions.
+- **Product phase (V1.0+)**: a configuration-recommendation API SaaS, integrable into existing training pipelines; pricing indexed to the compute saved (a "value-based pricing" model consistent with the value proposition).
+- **Enterprise infrastructure phase (V2.0)**: on-premise deployment for organizations whose confidentiality constraints prevent using an external API (particularly relevant for large proprietary models).
 
 ---
 
 ## 45. Final Research Thesis
 
-> **Une part significative de la dynamique d'apprentissage future d'un modèle est déterminée par des propriétés observables avant l'entraînement complet — architecture, statistiques de la tâche, statistiques d'initialisation — et cette relation, apprise sur un laboratoire de tâches synthétiques contrôlées, se transfère à des modèles et données réels avec un gain net (mesuré en steps, samples et compute) par rapport aux méthodes de recherche d'hyperparamètres classiques.**
+> **A significant part of a model's future learning dynamics is determined by properties observable before full training — architecture, task statistics, initialization statistics — and this relationship, learned on a laboratory of controlled synthetic tasks, transfers to real models and data with a net gain (measured in steps, samples, and compute) over classic hyperparameter search methods.**
 
-Cette thèse n'est **pas** présentée comme acquise. Elle est la conclusion que le protocole expérimental (§24) est construit pour confirmer, nuancer ou réfuter — avec, dans les trois cas, une contribution scientifique et une base technique (laboratoire, experiment database) qui restent utiles.
-
----
-
-## Annexe A — Identité du projet
-
-**Noms proposés** (fonctionnant comme projet open-source, framework de recherche, produit SaaS et infrastructure enterprise) :
-
-1. **PreTrainOpt** — descriptif, direct, facile à indexer techniquement.
-2. **Vantage** — évoque le point de vue pris *avant* de s'engager dans l'entraînement.
-3. **Primer** — au sens « amorcer » un entraînement avec une bonne configuration de départ.
-4. **Convergo** — évoque directement la convergence, sonorité internationale.
-5. **Nascent** — l'état du modèle avant training, connotation scientifique.
-6. **Priora** — de « a priori », connotation prédictive/bayésienne.
-
-**Recommandation :** **PreTrainOpt** pour le nom technique/dépôt (clarté immédiate pour un public ML), avec **Vantage** ou **Priora** en réserve pour un futur nom de produit commercial plus mémorable.
-
-**Tagline :** *« Know your training before you run it. »*
-
-**Mission :** Réduire le coût en données, en calcul et en temps de l'entraînement des réseaux de neurones en remplaçant la recherche d'hyperparamètres par une prédiction fondée sur les propriétés du modèle et de la tâche.
-
-**Vision :** Un futur où lancer un entraînement commence par une recommandation fiable et expliquée, pas par un essai à l'aveugle.
-
-**Problème :** Le tuning d'hyperparamètres consomme une part significative — et largement évitable — du budget de calcul et du temps d'ingénierie en machine learning.
-
-**Solution :** Un système de meta-apprentissage, entraîné sur un laboratoire de tâches synthétiques contrôlées, qui prédit une configuration d'entraînement quasi-optimale avant, ou avec un minimum de, calcul réel.
-
-**Proposition de valeur :** Moins de données, moins de compute, moins de temps d'ingénieur — pour une performance égale ou meilleure, avec un score de confiance explicite plutôt qu'une promesse aveugle.
+This thesis is **not** presented as established. It is the conclusion that the experimental protocol (§24) is built to confirm, qualify, or refute — with, in all three cases, a scientific contribution and a technical foundation (laboratory, experiment database) that remain useful.
 
 ---
 
-## Annexe B — Recommandation finale
+## Appendix A — Project Identity
 
-### Architecture recommandée pour le premier prototype
+**Proposed names** (working as an open-source project, research framework, SaaS product, and enterprise infrastructure):
 
-- **Scope** : MLP uniquement, tâches de régression synthétique (3-5 fonctions génératrices de complexité croissante).
-- **Hyperparamètres couverts** : learning rate, batch size, optimizer (Adam/AdamW/SGD), weight decay, méthode d'initialisation (Xavier/He/orthogonale) — volontairement limité à 5 pour rester interprétable.
-- **Génération de vérité terrain** : Optuna (TPE) comme recherche Bayesienne de référence, pas Vizier directement (plus simple à intégrer en Rust/Python pour un prototype).
-- **Meta-modèle** : gradient boosting (LightGBM), features tabulaires uniquement en V1 (pas de NTK/Hessienne au MVP — trop coûteux pour la première itération, à introduire en V0.3 une fois H1 partiellement validée).
-- **Infrastructure** : exécution locale/mono-machine au MVP, pas de Kubernetes avant que le volume d'expériences ne le justifie réellement.
+1. **PreTrainOpt** — descriptive, direct, easy to index technically.
+2. **Vantage** — evokes the vantage point taken *before* committing to training.
+3. **Primer** — in the sense of "priming" a training run with a good starting configuration.
+4. **Convergo** — directly evokes convergence, international-sounding.
+5. **Nascent** — the model's state before training, scientific connotation.
+6. **Priora** — from "a priori", predictive/Bayesian connotation.
 
-### Expériences prioritaires (dans l'ordre)
+**Recommendation:** **PreTrainOpt** for the technical/repo name (immediate clarity for an ML audience), with **Vantage** or **Priora** held in reserve for a more memorable future commercial product name.
 
-1. **Expérience de calibration** — pour une tâche synthétique fixée, balayer le learning rate seul (toutes choses égales par ailleurs, 5 graines) et vérifier qu'on retrouve une courbe en U conforme à la théorie (§9). *Objectif : valider l'instrumentation avant toute chose.*
-2. **Expérience factorielle LR × Batch size** — sur 3-4 tâches synthétiques de complexité croissante, pour tester l'interaction connue LR↔batch (règle linéaire empirique) et calibrer la méthodologie factorielle (§15) sur un cas où la réponse attendue est déjà connue.
-3. **Premier test de H1** — entraîner le meta-modèle sur 80 % des tâches synthétiques générées, évaluer sur les 20 % restantes (tâches jamais vues) : le meta-modèle bat-il la configuration par défaut ? C'est l'expérience qui décide si le projet continue tel quel ou pivote.
+**Tagline:** *"Know your training before you run it."*
 
-### Trois premières hypothèses à tester
+**Mission:** Reduce the data, compute, and time cost of neural network training by replacing hyperparameter search with a prediction grounded in the properties of the model and the task.
 
-1. **H1** — les features pré-training (modèle + tâche) portent un signal exploitable sur \(H^*\) — testée par l'expérience #3 ci-dessus.
-2. **H4** — il n'existe pas de configuration universelle — testée en mesurant la variance de \(H^*\) trouvé par Optuna à travers les tâches synthétiques (si la variance est faible, H4 est infirmée et le problème est plus simple que prévu ; si elle est forte, cela confirme le besoin d'un prédicteur conditionnel).
-3. **H5** — les rendements décroissants du probing — testée en comparant, sur le meilleur modèle issu du MVP, la précision de prédiction à 0 %, 0.1 % et 1 % de budget de probing.
+**Vision:** A future where launching a training run starts with a reliable, explained recommendation, not a blind trial.
 
-**Ne pas commencer à coder l'API de production, le dashboard ou l'architecture distribuée avant que H1 (expérience #3) ne soit tranchée.** Tout le reste du document (§18 à §44) est la trajectoire *si* le signal existe — pas une liste de tâches à exécuter en parallèle dès le premier jour.
+**Problem:** Hyperparameter tuning consumes a significant — and largely avoidable — share of the compute budget and engineering time in machine learning.
+
+**Solution:** A meta-learning system, trained on a laboratory of controlled synthetic tasks, that predicts a near-optimal training configuration before, or with a minimum of, real compute.
+
+**Value proposition:** Less data, less compute, less engineering time — for equal or better performance, with an explicit confidence score rather than a blind promise.
+
+---
+
+## Appendix B — Final Recommendation
+
+### Recommended architecture for the first prototype
+
+- **Scope**: MLP only, synthetic regression tasks (3-5 generative functions of increasing complexity).
+- **Hyperparameters covered**: learning rate, batch size, optimizer (Adam/AdamW/SGD), weight decay, initialization method (Xavier/He/orthogonal) — deliberately limited to 5 to remain interpretable.
+- **Ground-truth generation**: Optuna (TPE) as the reference Bayesian search, not Vizier directly (simpler to integrate in Rust/Python for a prototype).
+- **Meta-model**: gradient boosting (LightGBM), tabular features only in V1 (no NTK/Hessian at the MVP stage — too costly for the first iteration, to be introduced in V0.3 once H1 is partially validated).
+- **Infrastructure**: local/single-machine execution for the MVP, no Kubernetes before the volume of experiments genuinely justifies it.
+
+### Priority experiments (in order)
+
+1. **Calibration experiment** — for a fixed synthetic task, sweep the learning rate alone (all else equal, 5 seeds) and verify that a U-shaped curve consistent with theory (§9) is recovered. *Goal: validate the instrumentation before anything else.*
+2. **LR × batch size factorial experiment** — on 3-4 synthetic tasks of increasing complexity, to test the known LR↔batch interaction (empirical linear rule) and calibrate the factorial methodology (§15) on a case where the expected answer is already known.
+3. **First test of H1** — train the meta-model on 80% of the generated synthetic tasks, evaluate on the remaining 20% (never-seen tasks): does the meta-model beat the default configuration? This is the experiment that decides whether the project continues as-is or pivots.
+
+### Three hypotheses to test first
+
+1. **H1** — pre-training features (model + task) carry an exploitable signal about \(H^*\) — tested by experiment #3 above.
+2. **H4** — there is no universal configuration — tested by measuring the variance of \(H^*\) found by Optuna across synthetic tasks (if the variance is low, H4 is refuted and the problem is simpler than expected; if it is high, this confirms the need for a conditional predictor).
+3. **H5** — diminishing returns of probing — tested by comparing, on the best model resulting from the MVP, prediction accuracy at 0%, 0.1%, and 1% of probing budget.
+
+**Do not start coding the production API, the dashboard, or the distributed architecture before H1 (experiment #3) has been settled.** The rest of this document (§18 to §45) is the trajectory *if* the signal exists — not a list of tasks to execute in parallel from day one.

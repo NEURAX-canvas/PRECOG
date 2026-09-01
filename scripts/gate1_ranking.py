@@ -91,7 +91,11 @@ def main() -> None:
                     f"jac_cond={zc['jacobian_condition_mean']:.3g}"
                 )
 
-    proxies = ["synflow", "snip", "grasp", "jacobian_condition_mean"]
+    proxies = [
+        "synflow", "snip", "grasp", "jacob_cov", "effective_rank", "hessian_trace",
+        "jacobian_condition_mean", "gradient_norm", "gradient_norm_variance",
+        "activation_mean", "activation_variance",
+    ]
     true_steps_arr = np.array([r["true_steps"] for r in rows])
 
     print(f"\n--- Gate 1: ranking correlation (n={len(rows)} task x config pairs) ---")

@@ -77,6 +77,13 @@ def train(
     """PROBE or FULL_TRAINING only. Every call here means DeltaW != 0 by
     contract -- if you want PURE-mode analysis, use precog.trainability
     instead, which never imports this module's optimizer step."""
+    if protocol.mode == Mode.PROBE and not (50 <= protocol.max_steps <= 1000):
+        raise ValueError(
+            f"PROBE is bounded by contract (docs.md §5: 'e.g. 50-1000 steps, "
+            f"0.1-1% of the total budget'), got max_steps={protocol.max_steps}. "
+            f"Use Mode.FULL_TRAINING if you actually need an unrestricted run."
+        )
+
     torch.manual_seed(protocol.seed)
     generator = torch.Generator().manual_seed(protocol.seed)
 

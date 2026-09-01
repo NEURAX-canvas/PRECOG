@@ -60,7 +60,12 @@ def _init_layer(layer: nn.Linear, init_method: InitMethod, nonlinearity: Activat
 
 
 def model_features(model: nn.Sequential, architecture: ModelArchitecture, init_method: InitMethod) -> dict:
-    """X_model (docs.md §9.1): architecture-only descriptors, no data, no training."""
+    """X_model (docs.md §9.1): depth, width, n_params, FLOPs, activation,
+    normalization, residual-connection ratio, attention structure, required
+    memory -- every descriptor §9.1 names, even where the current MLP family
+    makes a descriptor trivially absent (normalization/residual/attention
+    are all None/0 until those architecture families exist, per the §25
+    curriculum: MLP now, CNN/ResNet/Transformer later)."""
     n_params = sum(p.numel() for p in model.parameters())
     # FLOPs for one forward pass of an MLP: 2 * in * out per Linear layer (mul+add).
     flops = 0
@@ -69,6 +74,10 @@ def model_features(model: nn.Sequential, architecture: ModelArchitecture, init_m
         flops += 2 * in_dim * architecture.width
         in_dim = architecture.width
     flops += 2 * in_dim * 1
+
+    # Required memory: parameters + gradients + Adam-like optimizer state
+    # (2 extra moments per param), float32 (docs.md §9.1 "mémoire requise").
+    required_memory_bytes = n_params * 4 * 4
 
     weight_norms = [
         layer.weight.detach().norm().item() for layer in model if isinstance(layer, nn.Linear)
@@ -79,6 +88,10 @@ def model_features(model: nn.Sequential, architecture: ModelArchitecture, init_m
         "n_params": n_params,
         "flops": flops,
         "activation": architecture.activation.value,
+        "normalization": "none",
+        "residual_connection_ratio": 0.0,
+        "attention_structure": "none",
+        "required_memory_bytes": required_memory_bytes,
         "init_method": init_method.value,
         "weight_norm_mean": sum(weight_norms) / len(weight_norms),
         "weight_norm_std": torch.tensor(weight_norms).std(unbiased=False).item(),

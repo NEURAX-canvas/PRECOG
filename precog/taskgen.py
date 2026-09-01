@@ -58,11 +58,27 @@ def generate(config: TaskConfig) -> tuple[torch.Tensor, torch.Tensor, dict]:
 
     corr = np.corrcoef(x, rowvar=False)
     off_diag = corr[np.triu_indices_from(corr, k=1)]
+    # Redundancy (docs.md §9.2): fraction of feature pairs that are near-
+    # duplicates, distinct from the mean correlation (a few highly
+    # correlated pairs vs. many mildly correlated ones look the same under
+    # a plain mean but very different under this threshold).
+    redundancy = float(np.mean(np.abs(off_diag) > 0.9)) if off_diag.size else 0.0
+    # Differential entropy of the target under a Gaussian approximation
+    # (docs.md §9.2 "entropie") -- the task generator only ever produces
+    # Gaussian-distributed inputs, so this closed form is exact for x and an
+    # approximation for the (possibly non-Gaussian) transformed target y.
+    target_variance = float(np.var(y))
+    target_entropy_estimate = 0.5 * float(np.log(2 * np.pi * np.e * max(target_variance, 1e-12)))
+
     features = {
         "input_dim": config.input_dim,
         "noise_level": config.noise_level,
         "n_samples": config.n_samples,
-        "target_variance": float(np.var(y)),
+        "target_variance": target_variance,
+        "target_entropy_estimate": target_entropy_estimate,
         "feature_correlation_mean": float(np.mean(np.abs(off_diag))) if off_diag.size else 0.0,
+        "redundancy": redundancy,
+        "class_imbalance": None,  # not applicable: regression task, no classes
+        "distribution": "gaussian",
     }
     return torch.from_numpy(x), torch.from_numpy(y).unsqueeze(1), features

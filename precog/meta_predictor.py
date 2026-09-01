@@ -224,6 +224,40 @@ class MetaPredictor:
         )
 
 
+class ZeroCostHeuristicPredictor:
+    """No learning at all -- ranks candidates directly by a single raw
+    zero-cost proxy, exactly the methodology the zero-cost NAS literature
+    itself uses (source.md pillar 3: SynFlow/SNIP/NASWOT papers rank
+    architectures by the proxy score directly, no meta-model on top). Worth
+    testing on its own merits: the learned RandomForest wrapper (44-48%
+    accuracy) barely beats the universal baseline, so it's a fair question
+    whether the wrapper is adding value over the raw signal Gate 1 already
+    validated (gradient_norm_variance alone: rho=0.670, the single strongest
+    proxy found).
+
+    Needs zero training data at all -- this is the "PRECOG-0" tier
+    (docs.md's own §19.1 ablation ladder starts at "Zero-Cost only")."""
+
+    def __init__(self, proxy_name: str = "gradient_norm_variance", higher_is_better: bool = False):
+        self.proxy_name = proxy_name
+        self.higher_is_better = higher_is_better
+
+    def recommend(self, features_row: pd.DataFrame, zero_cost_by_candidate: dict[InitMethod, dict]) -> Recommendation:
+        per_candidate = {
+            c.value: {"expected_steps": float("nan"), "std_steps": 0.0, "raw_score": zc[self.proxy_name]}
+            for c, zc in zero_cost_by_candidate.items()
+        }
+        key_fn = lambda k: per_candidate[k]["raw_score"] * (-1 if self.higher_is_better else 1)
+        best_init_name = min(per_candidate, key=key_fn)
+        return Recommendation(
+            recommended_init=InitMethod(best_init_name),
+            expected_steps=float("nan"),
+            steps_range=(float("nan"), float("nan")),
+            confidence=float("nan"),  # this method makes no probabilistic claim -- see docs.md §20
+            per_candidate=per_candidate,
+        )
+
+
 class KNNMetaPredictor:
     """Alternative to the RandomForest MetaPredictor (docs.md §19 ablation
     spirit): predicts purely from the Meta-Knowledge Base's (§9.6) nearest

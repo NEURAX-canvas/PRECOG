@@ -15,11 +15,20 @@ candidates evaluated here:
                 in raw space)
   knn         - no learned model: Meta-Knowledge Base (§9.6) nearest-
                 neighbor prior alone
+  zc_gradnormvar / zc_jacobcov - no learned model, no training data needed
+                at all: rank candidates directly by a single raw zero-cost
+                proxy (source.md pillar 3's own methodology -- SynFlow/SNIP/
+                NASWOT papers rank architectures by the proxy score
+                directly). The "PRECOG-0" tier of docs.md §19.1's own
+                ablation ladder ("Zero-Cost only"), included to test whether
+                the learned RandomForest wrapper is adding value over the
+                raw signal at all.
 
-All four see the same TRAIN split, are evaluated once on the same locked
-TEST split, and are ranked by top-1 accuracy with confidence calibration
-(mean confidence vs. actual accuracy) reported alongside as a tiebreaker
-and an explicit red flag, not just accuracy alone.
+All candidates see the same TRAIN split (except the two zero-cost
+heuristics, which need none), are evaluated once on the same locked TEST
+split, and are ranked by top-1 accuracy with confidence calibration (mean
+confidence vs. actual accuracy) reported alongside as a tiebreaker and an
+explicit red flag, not just accuracy alone.
 """
 from __future__ import annotations
 
@@ -39,6 +48,7 @@ from precog.meta_predictor import (
     REDUCED_FEATURE_COLUMNS,
     KNNMetaPredictor,
     MetaPredictor,
+    ZeroCostHeuristicPredictor,
     compute_candidate_zero_cost,
     engineer_features,
 )
@@ -77,9 +87,15 @@ def evaluate(name, predictor, test_df, mkb):
                             f"{rec.confidence:.2f} | {hit} |")
 
     accuracy = hits / n
-    mean_confidence = float(np.mean(confidences))
-    print(f"{name:<12} accuracy={accuracy:.0%} ({hits}/{n})  mean_confidence={mean_confidence:.2f}  "
-          f"calibration_gap={mean_confidence - accuracy:+.2f}")
+    # ZeroCostHeuristicPredictor makes no probabilistic claim (docs.md
+    # §20's confidence machinery doesn't apply to a raw, unlearned rule),
+    # so its confidences are all NaN by design -- nanmean keeps this from
+    # poisoning the whole comparison instead of silently propagating NaN.
+    mean_confidence = float(np.nanmean(confidences)) if not all(np.isnan(confidences)) else float("nan")
+    gap_str = f"{mean_confidence - accuracy:+.2f}" if not np.isnan(mean_confidence) else "N/A"
+    print(f"{name:<15} accuracy={accuracy:.0%} ({hits}/{n})  "
+          f"mean_confidence={'N/A' if np.isnan(mean_confidence) else f'{mean_confidence:.2f}'}  "
+          f"calibration_gap={gap_str}")
     return {"name": name, "accuracy": accuracy, "hits": hits, "n": n,
             "mean_confidence": mean_confidence, "detail_rows": detail_rows}
 
@@ -109,12 +125,19 @@ def main() -> None:
     for predictor in candidates.values():
         predictor.fit(train_engineered, train_df["training.init_method"], train_df["steps_to_threshold"])
     candidates["knn"] = KNNMetaPredictor(mkb)
+    # PRECOG-0 tier (docs.md §19.1): no learning at all, rank by the raw
+    # proxy directly -- source.md pillar 3's own zero-cost NAS methodology.
+    # Both proxies Gate 1 found strongest individually (higher value = more
+    # steps = worse, hence higher_is_better=False for both).
+    candidates["zc_gradnormvar"] = ZeroCostHeuristicPredictor("gradient_norm_variance", higher_is_better=False)
+    candidates["zc_jacobcov"] = ZeroCostHeuristicPredictor("jacob_cov", higher_is_better=False)
 
     print(f"Baselines: universal={universal_accuracy:.0%}  random={random_baseline:.0%}\n")
     print("--- Candidate Meta-Predictors on the locked TEST split ---")
     results = [evaluate(name, predictor, test_df, mkb) for name, predictor in candidates.items()]
 
-    winner = max(results, key=lambda r: (r["accuracy"], -(r["mean_confidence"] - r["accuracy"])))
+    winner = max(results, key=lambda r: (r["accuracy"], 0.0 if np.isnan(r["mean_confidence"])
+                                          else -(r["mean_confidence"] - r["accuracy"])))
     beats_universal = winner["accuracy"] > universal_accuracy
 
     print(f"\nWinner: {winner['name']} (accuracy={winner['accuracy']:.0%}, "

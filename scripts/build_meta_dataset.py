@@ -21,7 +21,7 @@ import random
 
 import torch
 
-from precog.experiment_db import record_experiment
+from precog.experiment_db import experiment_exists, record_experiment
 from precog.hardware import hardware_features
 from precog.model import Activation, InitMethod, ModelArchitecture, build_mlp, model_features
 from precog.modes import Mode, TrainingConfig, TrainProtocol, train
@@ -65,15 +65,23 @@ def main() -> None:
     args = parser.parse_args()
 
     tasks = build_tasks(args.n_tasks)
-    rng = random.Random(0)
-    n_test = max(1, int(args.test_fraction * len(tasks)))
-    test_indices = set(rng.sample(range(len(tasks)), n_test))
+    n_skipped, n_logged = 0, 0
 
     for task_idx, task_config in enumerate(tasks):
-        split = "test" if task_idx in test_indices else "train"
+        # Split assignment is a deterministic function of the task's own
+        # seed, not of its position in `tasks` -- growing --n-tasks must
+        # never re-shuffle a task that was already assigned to TRAIN into
+        # TEST (or vice versa), which a range-based rng.sample() would do
+        # silently every time len(tasks) changes (found the hard way: it
+        # would have broken §15.1's "TEST is locked" guarantee on every
+        # meta-dataset scale-up).
+        split = "test" if random.Random(f"split-{task_config.seed}").random() < args.test_fraction else "train"
         x, y, task_feat = generate(task_config)
 
         for init_method in INIT_METHODS:
+            if experiment_exists(task_config.seed, init_method.value):
+                n_skipped += 1
+                continue
             architecture = ModelArchitecture(
                 input_dim=task_config.input_dim, depth=2, width=32, activation=Activation.RELU
             )
@@ -115,10 +123,11 @@ def main() -> None:
                 outcome=result,
                 zero_cost_features=zc,
             )
+            n_logged += 1
 
         print(f"[{task_idx + 1}/{len(tasks)}] split={split} task={task_config.function.value} logged")
 
-    print("done.")
+    print(f"done. {n_logged} new experiments logged, {n_skipped} already present and skipped.")
 
 
 if __name__ == "__main__":

@@ -106,6 +106,20 @@ def connect():
         conn.close()
 
 
+def experiment_exists(seed: int, init_method: str) -> bool:
+    """Lets build_meta_dataset.py grow the meta-dataset incrementally
+    (bigger --n-tasks, same seed_offset) without ever needing to delete
+    data/meta_dataset.db -- which would silently wipe the gate_evaluations
+    and search_trials history too (found the hard way: rebuilding for a
+    larger meta-dataset once already did exactly that)."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM experiments WHERE seed = ? AND json_extract(training_json, '$.init_method') = ? LIMIT 1",
+            (seed, init_method),
+        ).fetchone()
+        return row is not None
+
+
 def record_experiment(
     *,
     split: str,

@@ -3,4 +3,5 @@
 __pycache__/
 *.pyc
 /data/*.jsonl
+/data/*.db
 .DS_Store

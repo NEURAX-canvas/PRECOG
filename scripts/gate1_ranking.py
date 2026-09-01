@@ -33,7 +33,7 @@ import pandas as pd
 import torch
 from scipy.stats import spearmanr
 
-from precog.experiment_db import record_experiment, record_gate_evaluation
+from precog.experiment_db import experiment_exists, record_experiment, record_gate_evaluation
 from precog.hardware import hardware_features
 from precog.model import Activation, InitMethod, ModelArchitecture, build_mlp, model_features
 from precog.modes import Mode, TrainingConfig, TrainProtocol, train
@@ -108,7 +108,16 @@ def main() -> None:
             # diagnostic runs aren't part of the Meta-Predictor's locked
             # train/test split (build_meta_dataset.py owns that), so they're
             # tagged "train" -- exploratory, never used for a final gate
-            # evaluation of the Meta-Predictor itself.
+            # evaluation of the Meta-Predictor itself. Guarded by
+            # experiment_exists() so re-running this script (e.g. after
+            # adding a new proxy) doesn't duplicate these 12 tasks' rows in
+            # the meta-dataset every time -- found after this script's
+            # repeat runs this session had silently inflated the "train"
+            # split's row count (756 -> 792 -> 828) without adding any new
+            # distinct tasks.
+            if experiment_exists(task_config.seed, init_method.value):
+                rows.append({**zc, "true_steps": true_steps, "task": task_config.function.value})
+                continue
             record_experiment(
                 split="train",
                 seed=task_config.seed,

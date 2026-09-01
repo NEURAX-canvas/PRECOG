@@ -42,6 +42,9 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import ConstantKernel, Matern, WhiteKernel
+from sklearn.preprocessing import StandardScaler
 
 from precog.meta_knowledge_base import MetaKnowledgeBase
 from precog.model import InitMethod
@@ -201,6 +204,93 @@ class MetaPredictor:
         freshly-computed PURE-mode X_ZC, see compute_candidate_zero_cost()),
         keep the best, but report all of them (the Rank/Optimize step, §18
         diagram, needs the full set, not just the winner)."""
+        per_candidate = {}
+        for candidate in CANDIDATE_INIT_METHODS:
+            x_row = _with_candidate(features_row, candidate, zero_cost_by_candidate[candidate])
+            mean_steps, std_steps = self._predict_with_uncertainty(x_row)
+            per_candidate[candidate.value] = {"expected_steps": mean_steps, "std_steps": std_steps}
+
+        best_init_name = min(per_candidate, key=lambda k: per_candidate[k]["expected_steps"])
+        best = per_candidate[best_init_name]
+        relative_spread = best["std_steps"] / max(best["expected_steps"], 1e-6)
+        confidence = float(np.clip(1.0 - relative_spread, 0.0, 1.0))
+
+        return Recommendation(
+            recommended_init=InitMethod(best_init_name),
+            expected_steps=best["expected_steps"],
+            steps_range=(
+                max(0.0, best["expected_steps"] - best["std_steps"]),
+                best["expected_steps"] + best["std_steps"],
+            ),
+            confidence=confidence,
+            per_candidate=per_candidate,
+        )
+
+
+class GPMetaPredictor:
+    """Gaussian Process regression on steps_to_threshold -- stack.md names
+    GPyTorch/BoTorch/Ax as PRECOG's *target* framework (Optuna as a
+    "lightweight interim"), a decision never actually tested empirically
+    until now. sklearn's exact GP is fast enough at this meta-dataset's
+    scale (~250 training tasks) to test the hypothesis without pulling in
+    the heavier dependency: does a GP's posterior std -- a principled
+    predictive uncertainty, unlike RandomForestRegressor's ad-hoc
+    inter-tree spread -- fix this project's recurring calibration problem
+    (mean confidence tracking accuracy poorly across every RF variant
+    tested in compare_meta_predictors.py so far)?
+
+    log_target defaults to True here (unlike MetaPredictor): a GP's
+    Matern kernel assumes roughly homoscedastic, smooth noise, which the
+    1600-step non-convergence penalty's heavy right tail badly violates in
+    raw space.
+    """
+
+    def __init__(
+        self,
+        feature_columns: list[str] | None = None,
+        log_target: bool = True,
+        random_state: int = 0,
+    ):
+        self.feature_columns = feature_columns if feature_columns is not None else REDUCED_FEATURE_COLUMNS
+        self.log_target = log_target
+        kernel = ConstantKernel(1.0, (1e-2, 1e2)) * Matern(length_scale=1.0, nu=2.5) + WhiteKernel(
+            noise_level=1.0, noise_level_bounds=(1e-3, 1e2)
+        )
+        self.model = GaussianProcessRegressor(
+            kernel=kernel, normalize_y=True, random_state=random_state, n_restarts_optimizer=3
+        )
+        self.scaler = StandardScaler()
+        self._fitted_columns: list[str] | None = None
+
+    def fit(self, features: pd.DataFrame, init_methods: pd.Series, steps_to_threshold: pd.Series) -> None:
+        rows = []
+        for (_, feat_row), init_value in zip(features.iterrows(), init_methods):
+            zc = {col.removeprefix("zero_cost."): feat_row[col] for col in ZERO_COST_COLUMNS}
+            row = _with_candidate(feat_row.to_frame().T, InitMethod(init_value), zc)
+            rows.append(row)
+        x_train = pd.concat(rows, ignore_index=True)[self.feature_columns + _candidate_columns()]
+        self._fitted_columns = list(x_train.columns)
+        x_scaled = self.scaler.fit_transform(x_train.to_numpy())
+        target = np.log1p(steps_to_threshold.to_numpy()) if self.log_target else steps_to_threshold.to_numpy()
+        self.model.fit(x_scaled, target)
+
+    def _predict_with_uncertainty(self, x_row: pd.DataFrame) -> tuple[float, float]:
+        x = self.scaler.transform(x_row[self._fitted_columns].to_numpy())
+        mean, std = self.model.predict(x, return_std=True)
+        mean, std = float(mean[0]), float(std[0])
+        if self.log_target:
+            # First-order (delta-method) transform of the log-space
+            # posterior back to raw steps: d(expm1)/dz = exp(z), evaluated
+            # at the posterior mean.
+            mean_steps = float(np.expm1(mean))
+            std_steps = float(mean_steps * std)
+        else:
+            mean_steps, std_steps = mean, std
+        return mean_steps, std_steps
+
+    def recommend(
+        self, features_row: pd.DataFrame, zero_cost_by_candidate: dict[InitMethod, dict]
+    ) -> Recommendation:
         per_candidate = {}
         for candidate in CANDIDATE_INIT_METHODS:
             x_row = _with_candidate(features_row, candidate, zero_cost_by_candidate[candidate])

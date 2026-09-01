@@ -23,6 +23,11 @@ nonlinear ones).
   log_rf      - RandomForest, all features, log1p(steps) target (the
                 1600-step non-convergence penalty is a heavy-tailed outlier
                 in raw space)
+  gp_reduced  - Gaussian Process regression (sklearn), only the §21-validated
+                zero-cost proxies, log1p target -- tests stack.md's own named
+                target framework (GPyTorch/BoTorch/Ax) empirically for the
+                first time, specifically for its principled posterior
+                uncertainty vs RandomForest's ad-hoc tree-spread confidence
   knn         - no learned model: Meta-Knowledge Base (§9.6) nearest-
                 neighbor prior alone
   zc_gradnormvar / zc_jacobcov - no learned model, no training data needed
@@ -56,6 +61,7 @@ from precog.meta_knowledge_base import MetaKnowledgeBase
 from precog.meta_predictor import (
     FEATURE_COLUMNS,
     REDUCED_FEATURE_COLUMNS,
+    GPMetaPredictor,
     KNNMetaPredictor,
     MetaPredictor,
     ZeroCostHeuristicPredictor,
@@ -159,6 +165,10 @@ def main() -> None:
         "full_rf": MetaPredictor(feature_columns=FEATURE_COLUMNS, log_target=False),
         "reduced_rf": MetaPredictor(feature_columns=REDUCED_FEATURE_COLUMNS, log_target=False),
         "log_rf": MetaPredictor(feature_columns=FEATURE_COLUMNS, log_target=True),
+        # Tests stack.md's own named target framework (GPyTorch/BoTorch/Ax)
+        # empirically for the first time: a GP's posterior std is a
+        # principled uncertainty, unlike RandomForest's ad-hoc tree spread.
+        "gp_reduced": GPMetaPredictor(feature_columns=REDUCED_FEATURE_COLUMNS, log_target=True),
     }
     for predictor in candidates.values():
         predictor.fit(train_engineered, train_df["training.init_method"], train_df["steps_to_threshold"])
@@ -175,15 +185,22 @@ def main() -> None:
     print("--- Candidate Meta-Predictors on the locked TEST split ---")
     results = [evaluate(name, predictor, test_df, mkb) for name, predictor in candidates.items()]
 
-    # Accuracy first, then regret (the practically meaningful tiebreaker --
-    # a wrong call that costs 5 steps beats one that costs 700), then
-    # calibration gap as a last resort. Regret ranks ahead of calibration
-    # gap deliberately: a NaN-confidence heuristic (no probabilistic claim
-    # to calibrate) should not lose a tie to a worse-regret learned model
-    # just because it has no confidence gap to be penalized on.
-    winner = max(results, key=lambda r: (r["accuracy"], -r["mean_regret"],
+    # Regret first, not accuracy: at n=60 test tasks, top-1 accuracy is
+    # unstable enough that a single flipped task changes which candidate
+    # "wins" -- observed directly comparing two runs of this exact script,
+    # one on a meta-dataset accidentally inflated with 72 duplicate rows
+    # (reduced_rf and zc_jacobcov tied at 47%) and one on the same data
+    # cleaned (reduced_rf edges ahead at 48% vs 47%, purely from that
+    # dedup). Accuracy-first selection would have crowned reduced_rf both
+    # times on that basis alone -- but reduced_rf's regret on the clean run
+    # (+32.9 steps) is actually *worse* than doing nothing (the universal
+    # baseline's +22.2), while zc_jacobcov's (+14.6) is not. A method that
+    # is more often exactly right but wrong by more when it misses is not
+    # obviously better in practice; accuracy alone can't see that.
+    # Calibration gap remains the last-resort tiebreaker.
+    winner = min(results, key=lambda r: (r["mean_regret"], -r["accuracy"],
                                           0.0 if np.isnan(r["mean_confidence"])
-                                          else -(r["mean_confidence"] - r["accuracy"])))
+                                          else (r["mean_confidence"] - r["accuracy"])))
     beats_universal = winner["accuracy"] > universal_accuracy
 
     beats_universal_regret = winner["mean_regret"] < universal_mean_regret
@@ -239,6 +256,16 @@ form relative_regret = regret / steps(true best init) -- a wrong top-1 call
 that costs 5 extra steps and one that costs 700 extra steps are both
 "misses" under accuracy alone, but very different practical outcomes.
 
+Winner selection is now regret-first, not accuracy-first: a same-day rerun
+of this exact script, before vs. after fixing a data-hygiene bug that had
+duplicated 72 rows into the TRAIN split, flipped `reduced_rf` from tied
+with `zc_jacobcov` at 47% to a lone lead at 48% -- purely from the dedup,
+one task's worth of noise at this sample size. Accuracy-first selection
+would have crowned `reduced_rf` either way, despite its regret on the clean
+run (+32.9 steps) being *worse* than the universal baseline itself
+(+22.2 steps) -- i.e. more often exactly right, but wrong by more when it
+misses. Regret catches that; accuracy alone cannot.
+
 ## Results
 
 | candidate | accuracy | mean confidence | calibration gap | mean regret (steps) | mean relative regret |
@@ -247,10 +274,12 @@ that costs 5 extra steps and one that costs 700 extra steps are both
 
 ## Winner: `{winner['name']}`
 
-Selected by accuracy first, then by the lowest mean regret (the
-practically meaningful tiebreaker), then by the smallest confidence/accuracy
-calibration gap (docs.md §23 "poorly calibrated uncertainty" risk) as a
-last resort. {'Beats' if beats_universal else 'Does NOT beat'} the
+Selected by lowest mean regret first (top-1 accuracy at n={len(test_df)//3}
+test tasks is too unstable to rank on alone -- see the note above this
+report on how a single flipped task previously changed the ranking), then
+by accuracy, then by the smallest confidence/accuracy calibration gap
+(docs.md §23 "poorly calibrated uncertainty" risk) as a last resort.
+{'Beats' if beats_universal else 'Does NOT beat'} the
 universal-config baseline on accuracy ({universal_accuracy:.0%}), and
 {'beats' if beats_universal_regret else 'does NOT beat'} it on regret
 ({universal_mean_regret:+.1f} mean steps).

@@ -73,3 +73,18 @@ evaluation_id,timestamp,generation,gate_number,metric_name,metric_value,threshol
 72,2026-09-01 22:02:53,v1-meta-predictor-zc_gradnormvar,2,mean_regret_steps_to_threshold,41.083333333333336,0.0,1,60,regret = steps(predicted_init) - steps(true_best_init); relative_regret=+22.65%; universal_baseline_regret=+22.2; random_baseline_regret=+43.2
 73,2026-09-01 22:02:53,v1-meta-predictor-zc_jacobcov,2,top1_accuracy_init_method_adapted_recall_at_10,0.4666666666666667,0.8,0,60,"universal_baseline=0.38, random_baseline=0.33, mean_confidence=nan, winner=yes"
 74,2026-09-01 22:02:53,v1-meta-predictor-zc_jacobcov,2,mean_regret_steps_to_threshold,14.566666666666666,0.0,1,60,regret = steps(predicted_init) - steps(true_best_init); relative_regret=+18.31%; universal_baseline_regret=+22.2; random_baseline_regret=+43.2
+75,2026-09-01 22:06:23,v1-trainability-engine,1,spearman_rho_naive_combined_zero_cost_vs_steps,0.5602266711928365,0.7,0,36,"controlled experiment (§21): 12 tasks x 3 init methods, optimizer/LR/batch fixed"
+76,2026-09-01 22:06:23,v1-trainability-engine,1,spearman_rho_rank_aggregated_zero_cost_vs_steps,0.5696626744901379,0.7,0,36,"AZ-NAS-style (arXiv:2403.19232) rank-sum aggregation vs naive z-score averaging, same controlled experiment (§21): 12 tasks x 3 init methods"
+77,2026-09-01 22:06:23,v1-trainability-engine,1,spearman_rho_synflow_vs_steps,0.27029538398116937,0.7,0,36,"individual proxy, not the combined score used for the official gate verdict"
+78,2026-09-01 22:06:23,v1-trainability-engine,1,spearman_rho_snip_vs_steps,0.46726329344031337,0.7,0,36,"individual proxy, not the combined score used for the official gate verdict"
+79,2026-09-01 22:06:23,v1-trainability-engine,1,spearman_rho_grasp_vs_steps,-0.3798365157478436,0.7,0,36,"individual proxy, not the combined score used for the official gate verdict"
+80,2026-09-01 22:06:23,v1-trainability-engine,1,spearman_rho_jacob_cov_vs_steps,0.5133690105951372,0.7,0,36,"individual proxy, not the combined score used for the official gate verdict"
+81,2026-09-01 22:06:23,v1-trainability-engine,1,spearman_rho_effective_rank_vs_steps,0.4829029647714483,0.7,0,36,"individual proxy, not the combined score used for the official gate verdict"
+82,2026-09-01 22:06:23,v1-trainability-engine,1,spearman_rho_hessian_trace_vs_steps,0.4113822602760543,0.7,0,36,"individual proxy, not the combined score used for the official gate verdict"
+83,2026-09-01 22:06:23,v1-trainability-engine,1,spearman_rho_jacobian_condition_mean_vs_steps,0.43167182223075434,0.7,0,36,"individual proxy, not the combined score used for the official gate verdict"
+84,2026-09-01 22:06:23,v1-trainability-engine,1,spearman_rho_gradient_norm_vs_steps,0.606708360069098,0.7,0,36,"individual proxy, not the combined score used for the official gate verdict"
+85,2026-09-01 22:06:23,v1-trainability-engine,1,spearman_rho_gradient_norm_variance_vs_steps,0.6700573654073825,0.7,0,36,"individual proxy, not the combined score used for the official gate verdict"
+86,2026-09-01 22:06:23,v1-trainability-engine,1,spearman_rho_activation_mean_vs_steps,0.3934848786865797,0.7,0,36,"individual proxy, not the combined score used for the official gate verdict"
+87,2026-09-01 22:06:23,v1-trainability-engine,1,spearman_rho_activation_variance_vs_steps,0.3708234458826405,0.7,0,36,"individual proxy, not the combined score used for the official gate verdict"
+88,2026-09-01 22:06:23,v1-trainability-engine,1,spearman_rho_gradient_alignment_vs_steps,0.2306058304082671,0.7,0,36,"individual proxy, not the combined score used for the official gate verdict"
+89,2026-09-01 22:06:23,v1-trainability-engine,1,spearman_rho_zico_vs_steps,0.32807574309339166,0.7,0,36,"individual proxy, not the combined score used for the official gate verdict"

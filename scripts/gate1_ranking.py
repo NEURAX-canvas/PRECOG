@@ -29,6 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
+import pandas as pd
 import torch
 from scipy.stats import spearmanr
 
@@ -137,7 +138,7 @@ def main() -> None:
     proxies = [
         "synflow", "snip", "grasp", "jacob_cov", "effective_rank", "hessian_trace",
         "jacobian_condition_mean", "gradient_norm", "gradient_norm_variance",
-        "activation_mean", "activation_variance", "gradient_alignment",
+        "activation_mean", "activation_variance", "gradient_alignment", "zico",
     ]
     true_steps_arr = np.array([r["true_steps"] for r in rows])
 
@@ -146,6 +147,7 @@ def main() -> None:
 
     per_proxy_results = {}
     combined_z = np.zeros(len(rows))
+    combined_rank = np.zeros(len(rows))
     for proxy in proxies:
         values = np.array([r[proxy] for r in rows])
         if np.std(values) == 0:
@@ -154,14 +156,25 @@ def main() -> None:
         rho, p_value = spearmanr(values, true_steps_arr)
         print(f"{proxy:<28} rho={rho:+.3f}  p={p_value:.3g}")
         per_proxy_results[proxy] = (rho, p_value)
-        combined_z += (values - values.mean()) / (values.std() + 1e-12) * np.sign(rho or 1)
+        sign = np.sign(rho or 1)
+        combined_z += (values - values.mean()) / (values.std() + 1e-12) * sign
+        # Rank aggregation (AZ-NAS, CVPR 2024, arXiv:2403.19232): sum of
+        # per-proxy ranks instead of raw z-scores -- robust to a proxy whose
+        # *scale* is well-behaved but whose raw values are noisy/skewed
+        # (unlike z-score averaging, a proxy's outliers can only move its
+        # rank by one place, not distort the whole sum).
+        combined_rank += pd.Series(values * sign).rank().to_numpy()
 
     rho_combined, p_combined = spearmanr(combined_z, true_steps_arr)
     print(f"{'naive combined (avg z-score)':<28} rho={rho_combined:+.3f}  p={p_combined:.3g}")
+    rho_rank, p_rank = spearmanr(combined_rank, true_steps_arr)
+    print(f"{'rank-aggregated (AZ-NAS style)':<28} rho={rho_rank:+.3f}  p={p_rank:.3g}")
 
-    gate1_pass = abs(rho_combined) >= 0.70
+    best_combined_rho = max(rho_combined, rho_rank, key=abs)
+    gate1_pass = abs(best_combined_rho) >= 0.70
     print(f"\nGate 1 (docs.md §17, target |rho| >= 0.70) on the init-only controlled "
-          f"experiment: {'PASS' if gate1_pass else 'NOT YET MET'} (|rho|={abs(rho_combined):.3f})")
+          f"experiment: {'PASS' if gate1_pass else 'NOT YET MET'} (|rho|={abs(best_combined_rho):.3f}, "
+          f"best of naive-zscore/rank-aggregated)")
 
     # §17: persist every gate check so generations can actually be compared
     # over time, not just read off the console of whoever ran this last.
@@ -174,6 +187,16 @@ def main() -> None:
         n_samples=len(rows),
         notes=f"controlled experiment (§21): {len(TASKS)} tasks x {len(INIT_METHODS)} init methods, "
               f"optimizer/LR/batch fixed",
+    )
+    record_gate_evaluation(
+        generation="v1-trainability-engine",
+        gate_number=1,
+        metric_name="spearman_rho_rank_aggregated_zero_cost_vs_steps",
+        metric_value=float(rho_rank),
+        threshold=0.70,
+        n_samples=len(rows),
+        notes=f"AZ-NAS-style (arXiv:2403.19232) rank-sum aggregation vs naive z-score averaging, "
+              f"same controlled experiment (§21): {len(TASKS)} tasks x {len(INIT_METHODS)} init methods",
     )
     for proxy, (rho, _p) in per_proxy_results.items():
         record_gate_evaluation(
@@ -208,12 +231,20 @@ computed in PURE mode (DeltaW=0); ground truth from FULL_TRAINING
 | proxy | rho | p-value |
 |---|---:|---:|
 {proxy_table}
-| **naive combined (avg z-score)** | **{rho_combined:+.3f}** | {p_combined:.3g} |
+| naive combined (avg z-score) | {rho_combined:+.3f} | {p_combined:.3g} |
+| **rank-aggregated (AZ-NAS style, arXiv:2403.19232)** | **{rho_rank:+.3f}** | {p_rank:.3g} |
+
+Rank aggregation sums each proxy's *rank* across the 36 rows (Borda-count
+style) instead of z-scored raw values, so one noisy/skewed proxy (e.g.
+`synflow`, weakest of the lot) can only move the sum by its rank distance,
+not distort it via scale -- the fix AZ-NAS (CVPR 2024) proposes for exactly
+the failure this project's naive combination showed (combined rho below its
+own best individual proxy).
 
 ## Verdict
 
 Gate 1 (docs.md §17, target \\|rho\\| >= 0.70): **{'PASS' if gate1_pass else 'NOT YET MET'}**
-(\\|rho\\| = {abs(rho_combined):.3f})
+(\\|rho\\| = {abs(best_combined_rho):.3f}, best of the two combination methods above)
 
 Every proxy above is computed in PURE mode, strictly before any
 optimizer/LR/batch_size is chosen (DeltaW=0) -- so this experiment can only

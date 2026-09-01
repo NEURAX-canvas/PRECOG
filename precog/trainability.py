@@ -39,6 +39,7 @@ a downstream learned meta-predictor, never by picking a single winner.
 from __future__ import annotations
 
 import copy
+import math
 
 import torch
 import torch.nn as nn
@@ -282,6 +283,41 @@ def gradient_alignment(
     return float(sum(similarities) / len(similarities)) if similarities else 0.0
 
 
+def zico(
+    model: nn.Sequential, x: torch.Tensor, y: torch.Tensor, loss_fn, n_batches: int = 8, batch_size: int = 16
+) -> float:
+    """ZiCo (Li et al., 2023, arXiv:2301.11300, source.md pillar 3): per
+    parameter, across several mini-batches at fixed/untrained weights (PURE,
+    DeltaW=0), the inverse coefficient of variation mean(|g|)/std(g) --
+    high mean, low variance in the gradient signal across batches predicts
+    fast, stable convergence. Score = sum over parameter tensors of
+    log(sum_theta mean(|g_theta|)/std(g_theta)), the paper's per-layer
+    log-sum aggregation (each nn.Linear's weight/bias here stands in for
+    one "layer" group). A different statistic from this module's existing
+    `gradient_norm_variance`, which is the variance of the scalar total
+    gradient *norm* across samples -- ZiCo instead tracks each individual
+    parameter's own sign/magnitude consistency across batches."""
+    model = copy.deepcopy(model)
+    params = [p for p in model.parameters() if p.requires_grad]
+    n = x.shape[0]
+    grads_per_batch: list[list[torch.Tensor]] = []
+    for _ in range(n_batches):
+        idx = torch.randperm(n)[: min(batch_size, n)]
+        loss = loss_fn(model(x[idx]), y[idx])
+        grads = torch.autograd.grad(loss, params, retain_graph=False)
+        grads_per_batch.append([g.detach() for g in grads])
+
+    score = 0.0
+    eps = 1e-12
+    for p_idx in range(len(params)):
+        stacked = torch.stack([grads_per_batch[b][p_idx] for b in range(n_batches)], dim=0)
+        mean_abs = stacked.abs().mean(dim=0)
+        std = stacked.std(dim=0, unbiased=False)
+        ratio = mean_abs / (std + eps)
+        score += math.log(ratio.sum().item() + eps)
+    return float(score)
+
+
 def zero_cost_features(
     model: nn.Sequential, input_dim: int, x: torch.Tensor, y: torch.Tensor, minibatch_size: int = 64
 ) -> dict:
@@ -306,6 +342,7 @@ def zero_cost_features(
         "effective_rank": effective_rank(model, x),
         "hessian_trace": hessian_trace(model, x, y, loss_fn),
         "gradient_alignment": gradient_alignment(model, x, y, loss_fn),
+        "zico": zico(model, x, y, loss_fn),
     }
     features.update(jacobian_conditioning(model, x))
     features.update(gradient_activation_stats(model, x, y, loss_fn))

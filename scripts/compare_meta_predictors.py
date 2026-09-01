@@ -5,6 +5,16 @@ evidence rather than assumption. Replaces train_meta_predictor.py, whose
 single full-feature RandomForest variant is now just one of the four
 candidates evaluated here:
 
+Also reports **regret**, not just top-1 accuracy: predicting the wrong
+init class is not uniformly bad -- picking Orthogonal when Xavier was
+truly best but only 5 steps faster is a good practical decision scored as
+a miss by accuracy alone, while picking Orthogonal when Xavier would have
+taken 700 fewer steps is a real error. regret = steps(predicted) -
+steps(true_best) makes that distinction explicit (relative_regret =
+regret / steps(true_best) so it's comparable across tasks of very
+different absolute difficulty, from ~20-step linear tasks to ~700-step
+nonlinear ones).
+
   full_rf     - RandomForest, all features (task+model+zero_cost+regime+prior)
   reduced_rf  - RandomForest, only the zero-cost proxies §21's controlled
                 experiment individually validated (gradient_norm,
@@ -67,12 +77,15 @@ def _prepare(df: pd.DataFrame) -> pd.DataFrame:
 
 def evaluate(name, predictor, test_df, mkb):
     hits, confidences, detail_rows = 0, [], []
+    regrets, relative_regrets = [], []
     n = 0
     for seed, group in test_df.groupby("seed"):
         n += 1
         features_row = group.iloc[[0]]
         engineered = engineer_features(features_row, mkb)
-        true_best_init = group.loc[group["steps_to_threshold"].idxmin(), "training.init_method"]
+        best_row = group.loc[group["steps_to_threshold"].idxmin()]
+        true_best_init = best_row["training.init_method"]
+        true_best_steps = best_row["steps_to_threshold"]
 
         task_config = task_config_from_row(features_row.iloc[0])
         architecture = architecture_from_row(features_row.iloc[0])
@@ -83,8 +96,16 @@ def evaluate(name, predictor, test_df, mkb):
         hit = rec.recommended_init.value == true_best_init
         hits += int(hit)
         confidences.append(rec.confidence)
+
+        predicted_steps = group.loc[
+            group["training.init_method"] == rec.recommended_init.value, "steps_to_threshold"
+        ].iloc[0]
+        regret = predicted_steps - true_best_steps
+        regrets.append(regret)
+        relative_regrets.append(regret / true_best_steps)
+
         detail_rows.append(f"| {seed} | {true_best_init} | {rec.recommended_init.value} | "
-                            f"{rec.confidence:.2f} | {hit} |")
+                            f"{rec.confidence:.2f} | {hit} | {regret:.0f} |")
 
     accuracy = hits / n
     # ZeroCostHeuristicPredictor makes no probabilistic claim (docs.md
@@ -93,11 +114,15 @@ def evaluate(name, predictor, test_df, mkb):
     # poisoning the whole comparison instead of silently propagating NaN.
     mean_confidence = float(np.nanmean(confidences)) if not all(np.isnan(confidences)) else float("nan")
     gap_str = f"{mean_confidence - accuracy:+.2f}" if not np.isnan(mean_confidence) else "N/A"
+    mean_regret = float(np.mean(regrets))
+    mean_relative_regret = float(np.mean(relative_regrets))
     print(f"{name:<15} accuracy={accuracy:.0%} ({hits}/{n})  "
           f"mean_confidence={'N/A' if np.isnan(mean_confidence) else f'{mean_confidence:.2f}'}  "
-          f"calibration_gap={gap_str}")
+          f"calibration_gap={gap_str}  mean_regret={mean_regret:+.1f} steps "
+          f"({mean_relative_regret:+.0%} relative)")
     return {"name": name, "accuracy": accuracy, "hits": hits, "n": n,
-            "mean_confidence": mean_confidence, "detail_rows": detail_rows}
+            "mean_confidence": mean_confidence, "mean_regret": mean_regret,
+            "mean_relative_regret": mean_relative_regret, "detail_rows": detail_rows}
 
 
 def main() -> None:
@@ -117,6 +142,19 @@ def main() -> None:
                                              "training.init_method"] == universal_init).mean())
     random_baseline = 1 / 3
 
+    universal_regrets, random_regrets = [], []
+    for _, group in test_df.groupby("seed"):
+        true_best_steps = group["steps_to_threshold"].min()
+        universal_row = group.loc[group["training.init_method"] == universal_init]
+        if len(universal_row):
+            universal_regrets.append(universal_row["steps_to_threshold"].iloc[0] - true_best_steps)
+        # Random baseline picks uniformly among the 3 candidates; its expected
+        # regret for this task is the mean regret across all 3, in closed form
+        # (no need to actually sample a random choice).
+        random_regrets.append((group["steps_to_threshold"] - true_best_steps).mean())
+    universal_mean_regret = float(np.mean(universal_regrets))
+    random_mean_regret = float(np.mean(random_regrets))
+
     candidates = {
         "full_rf": MetaPredictor(feature_columns=FEATURE_COLUMNS, log_target=False),
         "reduced_rf": MetaPredictor(feature_columns=REDUCED_FEATURE_COLUMNS, log_target=False),
@@ -132,17 +170,30 @@ def main() -> None:
     candidates["zc_gradnormvar"] = ZeroCostHeuristicPredictor("gradient_norm_variance", higher_is_better=False)
     candidates["zc_jacobcov"] = ZeroCostHeuristicPredictor("jacob_cov", higher_is_better=False)
 
-    print(f"Baselines: universal={universal_accuracy:.0%}  random={random_baseline:.0%}\n")
+    print(f"Baselines: universal={universal_accuracy:.0%} (mean_regret={universal_mean_regret:+.1f} steps)  "
+          f"random={random_baseline:.0%} (mean_regret={random_mean_regret:+.1f} steps)\n")
     print("--- Candidate Meta-Predictors on the locked TEST split ---")
     results = [evaluate(name, predictor, test_df, mkb) for name, predictor in candidates.items()]
 
-    winner = max(results, key=lambda r: (r["accuracy"], 0.0 if np.isnan(r["mean_confidence"])
+    # Accuracy first, then regret (the practically meaningful tiebreaker --
+    # a wrong call that costs 5 steps beats one that costs 700), then
+    # calibration gap as a last resort. Regret ranks ahead of calibration
+    # gap deliberately: a NaN-confidence heuristic (no probabilistic claim
+    # to calibrate) should not lose a tie to a worse-regret learned model
+    # just because it has no confidence gap to be penalized on.
+    winner = max(results, key=lambda r: (r["accuracy"], -r["mean_regret"],
+                                          0.0 if np.isnan(r["mean_confidence"])
                                           else -(r["mean_confidence"] - r["accuracy"])))
     beats_universal = winner["accuracy"] > universal_accuracy
 
+    beats_universal_regret = winner["mean_regret"] < universal_mean_regret
+    winner_gap_str = (f"{winner['mean_confidence'] - winner['accuracy']:+.2f}"
+                       if not np.isnan(winner["mean_confidence"]) else "N/A")
     print(f"\nWinner: {winner['name']} (accuracy={winner['accuracy']:.0%}, "
-          f"calibration_gap={winner['mean_confidence'] - winner['accuracy']:+.2f})")
-    print(f"Beats universal-config baseline ({universal_accuracy:.0%})? {beats_universal}")
+          f"calibration_gap={winner_gap_str}, "
+          f"mean_regret={winner['mean_regret']:+.1f} steps)")
+    print(f"Beats universal-config baseline on accuracy ({universal_accuracy:.0%})? {beats_universal}")
+    print(f"Beats universal-config baseline on regret ({universal_mean_regret:+.1f} steps)? {beats_universal_regret}")
 
     for r in results:
         record_gate_evaluation(
@@ -153,10 +204,19 @@ def main() -> None:
                   f"mean_confidence={r['mean_confidence']:.2f}, "
                   f"winner={'yes' if r['name'] == winner['name'] else 'no'}",
         )
+        record_gate_evaluation(
+            generation=f"v1-meta-predictor-{r['name']}", gate_number=2,
+            metric_name="mean_regret_steps_to_threshold",
+            metric_value=r["mean_regret"], threshold=0.0, n_samples=r["n"],
+            notes=f"regret = steps(predicted_init) - steps(true_best_init); "
+                  f"relative_regret={r['mean_relative_regret']:+.2%}; "
+                  f"universal_baseline_regret={universal_mean_regret:+.1f}; "
+                  f"random_baseline_regret={random_mean_regret:+.1f}",
+        )
 
     results_table = "\n".join(
         f"| {r['name']} | {r['accuracy']:.0%} ({r['hits']}/{r['n']}) | {r['mean_confidence']:.2f} | "
-        f"{r['mean_confidence'] - r['accuracy']:+.2f} |"
+        f"{r['mean_confidence'] - r['accuracy']:+.2f} | {r['mean_regret']:+.1f} | {r['mean_relative_regret']:+.0%} |"
         for r in sorted(results, key=lambda r: -r["accuracy"])
     )
     winner_detail = "\n".join(winner["detail_rows"])
@@ -170,28 +230,40 @@ tasks): `full_rf` (all features), `reduced_rf` (only §21-validated zero-cost
 proxies), `log_rf` (all features, log1p target), `knn` (Meta-Knowledge Base
 neighbor vote alone, no learned model).
 
-Baselines: universal-config = {universal_accuracy:.0%}, random = {random_baseline:.0%}.
+Baselines: universal-config = {universal_accuracy:.0%} (mean_regret={universal_mean_regret:+.1f} steps),
+random = {random_baseline:.0%} (mean_regret={random_mean_regret:+.1f} steps).
+
+Alongside top-1 accuracy, this run also reports **regret** = steps(predicted
+init) - steps(true best init) per test task, and its task-scale-normalized
+form relative_regret = regret / steps(true best init) -- a wrong top-1 call
+that costs 5 extra steps and one that costs 700 extra steps are both
+"misses" under accuracy alone, but very different practical outcomes.
 
 ## Results
 
-| candidate | accuracy | mean confidence | calibration gap |
-|---|---:|---:|---:|
+| candidate | accuracy | mean confidence | calibration gap | mean regret (steps) | mean relative regret |
+|---|---:|---:|---:|---:|---:|
 {results_table}
 
 ## Winner: `{winner['name']}`
 
-Selected by accuracy first, then by the smallest confidence/accuracy
-calibration gap (docs.md §23 "poorly calibrated uncertainty" risk) as
-tiebreaker. {'Beats' if beats_universal else 'Does NOT beat'} the
-universal-config baseline ({universal_accuracy:.0%}).
+Selected by accuracy first, then by the lowest mean regret (the
+practically meaningful tiebreaker), then by the smallest confidence/accuracy
+calibration gap (docs.md §23 "poorly calibrated uncertainty" risk) as a
+last resort. {'Beats' if beats_universal else 'Does NOT beat'} the
+universal-config baseline on accuracy ({universal_accuracy:.0%}), and
+{'beats' if beats_universal_regret else 'does NOT beat'} it on regret
+({universal_mean_regret:+.1f} mean steps).
 
-| seed | true best init | predicted | confidence | hit |
-|---|---|---|---:|---|
+| seed | true best init | predicted | confidence | hit | regret (steps) |
+|---|---|---|---:|---|---:|
 {winner_detail}
 
 ## Verdict
 
 {"H1 supported over H4 at this scale: the best Meta-Predictor design conditions on task/model features and beats a single universal init choice." if beats_universal else "H4 not refuted: even the best of four tested Meta-Predictor designs does not beat the universal-config baseline at this meta-dataset size (" + str(train_df['seed'].nunique()) + " training tasks). The bottleneck is data volume, not model choice -- see docs.md §27 'the meta-dataset's quality intrinsically bounds the meta-predictor's quality.'"}
+
+{"Regret analysis agrees with accuracy: the winner is also the practically cheaper choice on average, not just the more often-correct one." if beats_universal_regret == beats_universal else "Regret analysis diverges from accuracy: " + ("the winner is more often correct but its mistakes are not cheaper on average than the universal baseline's -- accuracy alone would have overstated its practical value." if beats_universal and not beats_universal_regret else "the winner is not more often correct, but when it does miss, it misses by less than the universal baseline does -- accuracy alone would have understated its practical value.")}
 """
     export_csv_snapshots()
     report_path = write_report("compare_meta_predictors", "Meta-Predictor Comparison (4 designs, locked test split)", report)

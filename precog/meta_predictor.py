@@ -10,13 +10,25 @@ neighborhood prior (§9.6, §13's "Prior Knowledge") is added as an extra,
 literature-consistent way to inject "similar tasks" experience alongside
 the model's own features.
 
+IMPORTANT correction from the first version of this module: X_ZC was
+initially left out of the feature set entirely, out of an overcautious
+leakage worry carried over from the archived v0 prototype (there,
+zero-cost-like features were excluded because the *target* was
+init_method itself via classification -- using an init-dependent feature to
+classify init would indeed leak). Here the design is different: init_method
+is an *input* (one-hot `candidate_init.*`), and the target is that
+candidate's own expected steps_to_threshold. The zero-cost score computed
+under that exact candidate init is not leakage in this framing -- it is
+exactly the signal scripts/gate1_ranking.py validated (§21's controlled
+experiment: gradient_norm_variance alone reaches rho=0.670 against real
+convergence speed). Leaving it out was throwing away the single best
+validated signal in the whole project. X_ZC is now included, computed
+per-candidate at both fit and predict time.
+
 For V1 scope (§25: Learning Rate, Batch Size, Optimizer, Initialization),
-this first version predicts one head -- T_hat, expected steps_to_threshold
--- for a candidate init_method, since §21's controlled experiment (see
-scripts/gate1_ranking.py) is the one axis validated so far to carry a
-signal the untrained model can actually explain (zero-cost proxies are
-computed under a specific init and can't describe a not-yet-chosen
-optimizer/LR/batch_size -- see that script's closing note).
+this predicts one head -- T_hat, expected steps_to_threshold -- for a
+candidate init_method (optimizer/LR/batch fixed, per §21's controlled
+design).
 
 Uncertainty is produced by ensembling (§9.7, §20's first suggested method):
 a random forest's per-tree predictions give a natural, cheap ensemble
@@ -28,11 +40,13 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+import torch
 from sklearn.ensemble import RandomForestRegressor
 
 from precog.meta_knowledge_base import MetaKnowledgeBase
 from precog.model import InitMethod
 from precog.regime import _bucket_noise, _bucket_volume
+from precog.trainability import zero_cost_features
 
 BASE_FEATURE_COLUMNS = [
     "task.input_dim",
@@ -47,11 +61,26 @@ BASE_FEATURE_COLUMNS = [
     "model.n_params",
     "model.flops",
 ]
+# The proxies scripts/gate1_ranking.py's controlled experiment (§21) actually
+# validated against real convergence speed (individually significant,
+# p < 0.05) -- see results/reports/*_gate1_ranking.md for the numbers this
+# selection is based on, not assumed.
+ZERO_COST_COLUMNS = [
+    "zero_cost.gradient_norm",
+    "zero_cost.gradient_norm_variance",
+    "zero_cost.jacob_cov",
+    "zero_cost.effective_rank",
+    "zero_cost.jacobian_condition_mean",
+]
 _NOISE_BUCKETS = ["clean", "moderate", "noisy"]
 _VOLUME_BUCKETS = ["low", "medium", "high"]
 REGIME_COLUMNS = [f"regime_noise.{b}" for b in _NOISE_BUCKETS] + [f"regime_volume.{b}" for b in _VOLUME_BUCKETS]
 PRIOR_COLUMNS = ["neighborhood_prior_steps_mean"]
-FEATURE_COLUMNS = BASE_FEATURE_COLUMNS + REGIME_COLUMNS + PRIOR_COLUMNS
+FEATURE_COLUMNS = BASE_FEATURE_COLUMNS + ZERO_COST_COLUMNS + REGIME_COLUMNS + PRIOR_COLUMNS
+# For the "reduced features" ablation (scripts/compare_meta_predictors.py):
+# only the individually-validated zero-cost signals, dropping the
+# regime/prior/architecture features that Gate 1 never tested directly.
+REDUCED_FEATURE_COLUMNS = ZERO_COST_COLUMNS
 
 CANDIDATE_INIT_METHODS = [InitMethod.XAVIER, InitMethod.HE, InitMethod.ORTHOGONAL]
 
@@ -60,7 +89,11 @@ def engineer_features(features_row: pd.DataFrame, mkb: MetaKnowledgeBase) -> pd.
     """Adds X_regime (§9.5, one-hot -- recomputed from raw task stats rather
     than trusting a stored regime label, so this also works for a brand new
     task never logged in the meta-dataset) and the Meta-Knowledge Base's
-    neighborhood prior (§9.6, §13) to the base task/model features."""
+    neighborhood prior (§9.6, §13) to the base task/model features.
+
+    X_ZC is handled separately: train time already has it stored per-row
+    (computed under the init that row actually used); predict time computes
+    it fresh per candidate via compute_candidate_zero_cost()."""
     row = features_row.copy()
     noise_bucket = _bucket_noise(row["task.noise_level"].iloc[0])
     volume_bucket = _bucket_volume(row["task.n_samples"].iloc[0])
@@ -74,10 +107,27 @@ def engineer_features(features_row: pd.DataFrame, mkb: MetaKnowledgeBase) -> pd.
     return row
 
 
-def _with_candidate_init(features_row: pd.DataFrame, init_method: InitMethod) -> pd.DataFrame:
+def compute_candidate_zero_cost(
+    architecture, input_dim: int, x: torch.Tensor, y: torch.Tensor
+) -> dict[InitMethod, dict]:
+    """PURE-mode X_ZC for every candidate init (§9.4/§5, DeltaW=0), used at
+    predict time when no stored experiment exists yet for this task."""
+    from precog.model import build_mlp
+
+    result = {}
+    for candidate in CANDIDATE_INIT_METHODS:
+        torch.manual_seed(0)
+        model = build_mlp(architecture, candidate)
+        result[candidate] = zero_cost_features(model, input_dim, x, y)
+    return result
+
+
+def _with_candidate(features_row: pd.DataFrame, init_method: InitMethod, zc: dict) -> pd.DataFrame:
     row = features_row.copy()
     for candidate in CANDIDATE_INIT_METHODS:
         row[f"candidate_init.{candidate.value}"] = float(candidate == init_method)
+    for col in ZERO_COST_COLUMNS:
+        row[col] = zc[col.removeprefix("zero_cost.")]
     return row
 
 
@@ -99,37 +149,61 @@ class Recommendation:
 class MetaPredictor:
     """One head for now (T_hat = expected steps_to_threshold); additional
     heads (A_hat, C_hat, N_hat, docs.md §9.7) are a straightforward
-    extension of the same ensemble once their ground truth is logged."""
+    extension of the same ensemble once their ground truth is logged.
 
-    def __init__(self, n_estimators: int = 300, random_state: int = 0):
+    `feature_columns` and `log_target` exist to support the ablation in
+    scripts/compare_meta_predictors.py (docs.md §19 "no proxy/feature is
+    assumed to help -- test it"): a log-space target (the 1600-step
+    non-convergence penalty is a heavy-tailed outlier in raw space) and a
+    reduced feature set are both tested as alternatives, not assumed to be
+    better than the full feature set."""
+
+    def __init__(
+        self,
+        n_estimators: int = 300,
+        random_state: int = 0,
+        feature_columns: list[str] | None = None,
+        log_target: bool = False,
+    ):
         self.model = RandomForestRegressor(
             n_estimators=n_estimators, random_state=random_state, min_samples_leaf=2
         )
+        self.feature_columns = feature_columns if feature_columns is not None else FEATURE_COLUMNS
+        self.log_target = log_target
         self._fitted_columns: list[str] | None = None
 
     def fit(self, features: pd.DataFrame, init_methods: pd.Series, steps_to_threshold: pd.Series) -> None:
+        """`features` rows must already carry their own zero_cost.* columns
+        (true at fit time: they come straight from the logged experiment,
+        computed under the init_method that row actually used)."""
         rows = []
         for (_, feat_row), init_value in zip(features.iterrows(), init_methods):
-            row = _with_candidate_init(feat_row.to_frame().T, InitMethod(init_value))
+            zc = {col.removeprefix("zero_cost."): feat_row[col] for col in ZERO_COST_COLUMNS}
+            row = _with_candidate(feat_row.to_frame().T, InitMethod(init_value), zc)
             rows.append(row)
-        x_train = pd.concat(rows, ignore_index=True)[FEATURE_COLUMNS + _candidate_columns()]
+        x_train = pd.concat(rows, ignore_index=True)[self.feature_columns + _candidate_columns()]
         self._fitted_columns = list(x_train.columns)
-        self.model.fit(x_train, steps_to_threshold.to_numpy())
+        target = np.log1p(steps_to_threshold.to_numpy()) if self.log_target else steps_to_threshold.to_numpy()
+        self.model.fit(x_train, target)
 
     def _predict_with_uncertainty(self, x_row: pd.DataFrame) -> tuple[float, float]:
         x_row = x_row[self._fitted_columns].to_numpy()
         tree_predictions = np.array([tree.predict(x_row)[0] for tree in self.model.estimators_])
+        if self.log_target:
+            tree_predictions = np.expm1(tree_predictions)
         return float(tree_predictions.mean()), float(tree_predictions.std())
 
-    def recommend(self, features_row: pd.DataFrame) -> Recommendation:
+    def recommend(
+        self, features_row: pd.DataFrame, zero_cost_by_candidate: dict[InitMethod, dict]
+    ) -> Recommendation:
         """docs.md §9.7: 'for each candidate configuration, a multi-head
-        prediction' -- query every candidate init, keep the best, but report
-        all of them (the Rank/Optimize step, §18 diagram, needs the full
-        set, not just the winner). `features_row` must already carry the
-        engineered regime/prior columns (see engineer_features())."""
+        prediction' -- query every candidate init (each with its own
+        freshly-computed PURE-mode X_ZC, see compute_candidate_zero_cost()),
+        keep the best, but report all of them (the Rank/Optimize step, §18
+        diagram, needs the full set, not just the winner)."""
         per_candidate = {}
         for candidate in CANDIDATE_INIT_METHODS:
-            x_row = _with_candidate_init(features_row, candidate)
+            x_row = _with_candidate(features_row, candidate, zero_cost_by_candidate[candidate])
             mean_steps, std_steps = self._predict_with_uncertainty(x_row)
             per_candidate[candidate.value] = {"expected_steps": mean_steps, "std_steps": std_steps}
 
@@ -147,4 +221,28 @@ class MetaPredictor:
             ),
             confidence=confidence,
             per_candidate=per_candidate,
+        )
+
+
+class KNNMetaPredictor:
+    """Alternative to the RandomForest MetaPredictor (docs.md §19 ablation
+    spirit): predicts purely from the Meta-Knowledge Base's (§9.6) nearest
+    neighbors, with no learned model of its own -- the simplest possible
+    baseline that still uses task similarity, worth testing given how few
+    training tasks exist so far (a 300-tree forest over 18 features on ~70
+    tasks is a lot of capacity for the data available)."""
+
+    def __init__(self, mkb: MetaKnowledgeBase):
+        self.mkb = mkb
+
+    def recommend(self, features_row: pd.DataFrame, zero_cost_by_candidate: dict[InitMethod, dict]) -> Recommendation:
+        prior = self.mkb.neighborhood_prior(features_row)
+        recommended = InitMethod(prior["neighborhood_prior_init"]) if prior["neighborhood_prior_init"] else InitMethod.XAVIER
+        expected_steps = prior["neighborhood_prior_steps_mean"]
+        return Recommendation(
+            recommended_init=recommended,
+            expected_steps=expected_steps,
+            steps_range=(expected_steps, expected_steps),
+            confidence=1.0 / (1.0 + prior["neighborhood_mean_distance"]),
+            per_candidate={recommended.value: {"expected_steps": expected_steps, "std_steps": 0.0}},
         )

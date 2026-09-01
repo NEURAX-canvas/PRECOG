@@ -96,3 +96,14 @@ def model_features(model: nn.Sequential, architecture: ModelArchitecture, init_m
         "weight_norm_mean": sum(weight_norms) / len(weight_norms),
         "weight_norm_std": torch.tensor(weight_norms).std(unbiased=False).item(),
     }
+
+
+def architecture_from_row(row) -> ModelArchitecture:
+    """Reconstructs a ModelArchitecture from a meta-dataset row
+    (precog.experiment_db.load_dataframe() output)."""
+    return ModelArchitecture(
+        input_dim=int(row["task.input_dim"]),
+        depth=int(row["model.depth"]),
+        width=int(row["model.width"]),
+        activation=Activation(row["model.activation"]),
+    )

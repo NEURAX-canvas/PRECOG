@@ -71,6 +71,8 @@ def generate(config: TaskConfig) -> tuple[torch.Tensor, torch.Tensor, dict]:
     target_entropy_estimate = 0.5 * float(np.log(2 * np.pi * np.e * max(target_variance, 1e-12)))
 
     features = {
+        "function": config.function.value,
+        "seed": config.seed,
         "input_dim": config.input_dim,
         "noise_level": config.noise_level,
         "n_samples": config.n_samples,
@@ -82,3 +84,17 @@ def generate(config: TaskConfig) -> tuple[torch.Tensor, torch.Tensor, dict]:
         "distribution": "gaussian",
     }
     return torch.from_numpy(x), torch.from_numpy(y).unsqueeze(1), features
+
+
+def task_config_from_row(row) -> TaskConfig:
+    """Reconstructs a TaskConfig from a meta-dataset row (precog.experiment_db
+    .load_dataframe() output): generate() is a pure function of TaskConfig,
+    so this losslessly reproduces the exact same synthetic (x, y) without
+    storing the raw tensors themselves in the database."""
+    return TaskConfig(
+        function=TaskFunction(row["task.function"]),
+        input_dim=int(row["task.input_dim"]),
+        noise_level=float(row["task.noise_level"]),
+        n_samples=int(row["task.n_samples"]),
+        seed=int(row["task.seed"]),
+    )

@@ -160,12 +160,13 @@ def run_trial_for_task(
     return json.loads(proc.stdout)
 
 
-# Calibrated in python/calibrate_probe.py: raw loss after 40 steps gave the
-# best and most stable rank correlation (Spearman rho=0.56) with the true
-# full-training ranking, on 40 training tasks -- clearly better than
-# normalizing by the initial loss, and budgets beyond 40 steps (80, 160)
-# didn't improve on it (diminishing returns, consistent with H5).
-PROBE_BUDGET = 40
+# Calibrated in python/calibrate_probe.py, v2: raw loss after 80 steps gave
+# the best rank correlation (Spearman rho=0.66) with the true full-training
+# ranking when evaluated under the meta-model's *predicted* (not real) H --
+# the same noisy inputs this probe actually sees in the pipeline below.
+# Clearly better than normalizing by the initial loss; correlation degrades
+# again at 160 steps.
+PROBE_BUDGET = 80
 PROBE_OPTIMIZERS = ["Sgd", "Adam", "AdamW"]
 PROBE_INIT_METHODS = ["Xavier", "He"]
 

@@ -137,7 +137,7 @@ def main() -> None:
     proxies = [
         "synflow", "snip", "grasp", "jacob_cov", "effective_rank", "hessian_trace",
         "jacobian_condition_mean", "gradient_norm", "gradient_norm_variance",
-        "activation_mean", "activation_variance",
+        "activation_mean", "activation_variance", "gradient_alignment",
     ]
     true_steps_arr = np.array([r["true_steps"] for r in rows])
 

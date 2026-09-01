@@ -248,6 +248,40 @@ def hessian_trace(
     return float(sum(estimates) / len(estimates))
 
 
+def gradient_alignment(
+    model: nn.Sequential, x: torch.Tensor, y: torch.Tensor, loss_fn, n_batches: int = 4, batch_size: int = 16
+) -> float:
+    """Directional consistency of the gradient (source.md pillar 5,
+    "Gradient Alignment" -- the old v0 prototype's README called this
+    "cosinus successif" and never implemented it either). Computed here as
+    the mean pairwise cosine similarity between gradients estimated from
+    several *different* random mini-batches, all at the *same* untrained
+    weights -- strictly PURE (DeltaW=0, §5): no optimizer.step() and no
+    weight change between batches, so this measures how consistent the
+    gradient signal already is at initialization, not a training-time
+    alignment across steps."""
+    model = copy.deepcopy(model)
+    params = list(model.parameters())
+    for p in params:
+        p.requires_grad_(True)
+
+    n = x.shape[0]
+    grad_vectors = []
+    for i in range(n_batches):
+        idx = torch.randperm(n)[: min(batch_size, n)]
+        loss = loss_fn(model(x[idx]), y[idx])
+        grads = torch.autograd.grad(loss, params, retain_graph=False)
+        grad_vectors.append(torch.cat([g.flatten() for g in grads]))
+
+    similarities = []
+    for i in range(len(grad_vectors)):
+        for j in range(i + 1, len(grad_vectors)):
+            similarities.append(
+                nn.functional.cosine_similarity(grad_vectors[i], grad_vectors[j], dim=0).item()
+            )
+    return float(sum(similarities) / len(similarities)) if similarities else 0.0
+
+
 def zero_cost_features(
     model: nn.Sequential, input_dim: int, x: torch.Tensor, y: torch.Tensor, minibatch_size: int = 64
 ) -> dict:
@@ -271,6 +305,7 @@ def zero_cost_features(
         "jacob_cov": jacob_cov(model, x),
         "effective_rank": effective_rank(model, x),
         "hessian_trace": hessian_trace(model, x, y, loss_fn),
+        "gradient_alignment": gradient_alignment(model, x, y, loss_fn),
     }
     features.update(jacobian_conditioning(model, x))
     features.update(gradient_activation_stats(model, x, y, loss_fn))

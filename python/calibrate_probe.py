@@ -133,6 +133,12 @@ def main() -> None:
 
         combos = list(true_steps.keys())
         true_rank = [true_steps[c] for c in combos]
+        if len(set(true_rank)) <= 1:
+            # All 6 combos tied (typically: none of them converged within the
+            # full budget) -- there is nothing to rank, and this task can't
+            # contribute evidence either way. Skip it rather than record a NaN.
+            print(f"task={task_row['task_id']:<40} true_best=TIE (no usable ranking, skipped)")
+            continue
 
         for budget in PROBE_BUDGETS:
             raw_rank = [probes[budget][c][0] for c in combos]

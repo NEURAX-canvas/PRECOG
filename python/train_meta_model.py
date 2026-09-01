@@ -54,6 +54,23 @@ BASELINE_TRAINING = {
 }
 
 
+def universal_config(train_df: pd.DataFrame) -> dict:
+    """The single best 'no features needed' config (§24/H4): median/mode of
+    H* across training tasks, applied blindly regardless of task features.
+
+    This is the baseline that actually separates H1 from H4: if the
+    conditional meta-model cannot beat *this*, task-conditioning isn't
+    pulling its weight and a single universal config would do just as well.
+    """
+    return {
+        "learning_rate": float(train_df["training.learning_rate"].median()),
+        "weight_decay": float(train_df["training.weight_decay"].median()),
+        "batch_size": int(train_df["training.batch_size"].mode()[0]),
+        "optimizer": str(train_df["training.optimizer"].mode()[0]),
+        "init_method": str(train_df["training.init_method"].mode()[0]),
+    }
+
+
 def load_meta_dataset() -> pd.DataFrame:
     records = [json.loads(line) for line in EXPERIMENT_DB.open()]
     df = pd.json_normalize(records)
@@ -136,9 +153,15 @@ def main() -> None:
     n_seeds = 5
     max_steps_penalty = 800 * 2
 
-    print(f"\n--- Decision experiment (Annexe B #3): predicted H* vs default baseline ({n_seeds} seeds/task) ---")
+    universal = universal_config(train_df)
+    print(f"\nUniversal config (median/mode of H* across {len(train_df)} training tasks): {universal}")
+
+    print(f"\n--- Decision experiment (Annexe B #3): predicted vs universal vs default baseline ({n_seeds} seeds/task) ---")
+    print("(wins/ties/losses below are PREDICTED vs UNIVERSAL -- the actual H1-vs-H4 test;")
+    print(" both are also compared against the naive default baseline for context.)")
     wins, ties, losses = 0, 0, 0
     all_predicted_steps: list[float] = []
+    all_universal_steps: list[float] = []
     all_baseline_steps: list[float] = []
     for idx, row in test_df.iterrows():
         features_row = x_test.loc[[idx]]
@@ -163,6 +186,7 @@ def main() -> None:
         }
 
         p_runs = [run_trial_for_task(row, predicted, seed=s) for s in range(n_seeds)]
+        u_runs = [run_trial_for_task(row, universal, seed=s) for s in range(n_seeds)]
         b_runs = [run_trial_for_task(row, BASELINE_TRAINING, seed=s) for s in range(n_seeds)]
 
         def penalized_steps(runs: list[dict]) -> list[float]:
@@ -171,50 +195,59 @@ def main() -> None:
             ]
 
         p_steps = penalized_steps(p_runs)
+        u_steps = penalized_steps(u_runs)
         b_steps = penalized_steps(b_runs)
         all_predicted_steps.extend(p_steps)
+        all_universal_steps.extend(u_steps)
         all_baseline_steps.extend(b_steps)
         p_mean, p_conv = float(np.mean(p_steps)), sum(r["converged"] for r in p_runs)
+        u_mean, u_conv = float(np.mean(u_steps)), sum(r["converged"] for r in u_runs)
         b_mean, b_conv = float(np.mean(b_steps)), sum(r["converged"] for r in b_runs)
 
         print(
             f"task={row['task_id']:<40} "
-            f"predicted: mean_steps={p_mean:.0f} converged={p_conv}/{n_seeds}  "
-            f"baseline: mean_steps={b_mean:.0f} converged={b_conv}/{n_seeds}  "
+            f"predicted={p_mean:.0f}({p_conv}/{n_seeds})  "
+            f"universal={u_mean:.0f}({u_conv}/{n_seeds})  "
+            f"baseline={b_mean:.0f}({b_conv}/{n_seeds})  "
             f"predicted_config={predicted}"
         )
 
-        if p_mean < b_mean:
+        if p_mean < u_mean:
             wins += 1
-        elif p_mean == b_mean:
+        elif p_mean == u_mean:
             ties += 1
         else:
             losses += 1
 
     n = len(test_df)
-    print(f"\nwins={wins} ties={ties} losses={losses} (out of {n} held-out tasks, "
-          f"{n_seeds} seeds/task, non-convergence penalized at {max_steps_penalty} steps)")
-    verdict = "PASS, see §24 success criterion (>=60%)" if wins / n >= 0.6 else "below the 60% MVP threshold -- see §24/§35"
-    print(f"H1 verdict: meta-model beats default baseline (by mean steps across {n_seeds} seeds) "
-          f"on {wins}/{n} held-out tasks ({verdict})")
 
-    # §28: paired significance test. Each (task, seed) pair trains predicted-H
-    # and baseline-H on the *same* synthetic sample (same task.seed), so the
-    # pairing is valid; note the n_seeds repeats per task are not independent
-    # of each other, so treat the p-value as indicative, not exact.
-    diffs = np.array(all_predicted_steps) - np.array(all_baseline_steps)
-    if np.all(diffs == 0):
-        print("Wilcoxon signed-rank: skipped (predicted and baseline are identical on every pair)")
+    def report_pair(name_a, steps_a, name_b, steps_b, wins_count=None):
+        diffs = np.array(steps_a) - np.array(steps_b)
+        if np.all(diffs == 0):
+            print(f"{name_a} vs {name_b}: identical on every pair, skipping test")
+            return
+        stat, p_value = wilcoxon(steps_a, steps_b)
+        sig = "significant at p<0.05" if p_value < 0.05 else "NOT significant at p<0.05"
+        extra = f" wins={wins_count}/{n}" if wins_count is not None else ""
+        print(f"{name_a} vs {name_b} (n={len(diffs)} paired task-seed runs):{extra} "
+              f"Wilcoxon statistic={stat:.1f} p_value={p_value:.4g} ({sig})")
+
+    print(f"\n--- Verdicts (§24/§28), {n_seeds} seeds x {n} held-out tasks ---")
+
+    print("\n[H1 vs H4] Does task-conditional prediction beat a single universal config?")
+    print(f"predicted beats universal on {wins}/{n} tasks (ties={ties}, losses={losses})")
+    report_pair("predicted", all_predicted_steps, "universal", all_universal_steps, wins)
+    if wins / n >= 0.6:
+        print("-> H1 supported over H4 at this scale: conditioning on task features earns its keep.")
     else:
-        stat, p_value = wilcoxon(all_predicted_steps, all_baseline_steps)
-        print(
-            f"Wilcoxon signed-rank test (predicted vs baseline steps, n={len(diffs)} "
-            f"paired task-seed runs): statistic={stat:.1f} p_value={p_value:.4g} "
-            f"({'significant at p<0.05' if p_value < 0.05 else 'NOT significant at p<0.05'})"
-        )
-    if n < 10:
-        print(f"Caveat: only {n} held-out tasks -- treat both the win-rate and the "
-              "p-value above as directional, not conclusive (§28: aim for ~10+ held-out tasks).")
+        print("-> H4 not refuted: a single fixed config does about as well as the conditional "
+              "predictor here -- the extra complexity of task-conditioning isn't paying off yet.")
+
+    print("\n[sanity] Does the universal config alone already beat the naive default baseline?")
+    report_pair("universal", all_universal_steps, "baseline", all_baseline_steps)
+
+    print("\n[headline, same as before] predicted vs naive default baseline:")
+    report_pair("predicted", all_predicted_steps, "baseline", all_baseline_steps)
 
 
 if __name__ == "__main__":

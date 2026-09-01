@@ -33,6 +33,12 @@ CREATE TABLE IF NOT EXISTS experiments (
     -- Dataset / task (docs.md §9.2)
     task_json TEXT NOT NULL,
 
+    -- Hardware (docs.md §9.3)
+    hardware_json TEXT NOT NULL,
+
+    -- Regime (docs.md §9.5)
+    regime_json TEXT NOT NULL,
+
     -- Hyperparameters under test (docs.md §10.1)
     training_json TEXT NOT NULL,
 
@@ -70,6 +76,8 @@ def record_experiment(
     mode: str,
     model_features: dict,
     task_features: dict,
+    hardware_features: dict,
+    regime: dict,
     training_config: dict,
     outcome,  # precog.modes.TrainResult
     zero_cost_features: dict | None = None,
@@ -78,10 +86,10 @@ def record_experiment(
         cursor = conn.execute(
             """
             INSERT INTO experiments (
-                split, seed, mode, model_json, task_json, training_json,
-                zero_cost_json, initial_loss, final_loss, steps_to_threshold,
+                split, seed, mode, model_json, task_json, hardware_json, regime_json,
+                training_json, zero_cost_json, initial_loss, final_loss, steps_to_threshold,
                 converged, diverged, wall_clock_s, delta_w_norm
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 split,
@@ -89,6 +97,8 @@ def record_experiment(
                 mode,
                 json.dumps(model_features),
                 json.dumps(task_features),
+                json.dumps(hardware_features),
+                json.dumps(regime),
                 json.dumps(training_config),
                 json.dumps(zero_cost_features) if zero_cost_features else None,
                 outcome.initial_loss,
@@ -113,7 +123,7 @@ def load_dataframe(split: str | None = None):
         params = (split,)
     with connect() as conn:
         df = pd.read_sql_query(query, conn, params=params)
-    for col in ("model_json", "task_json", "training_json", "zero_cost_json"):
+    for col in ("model_json", "task_json", "hardware_json", "regime_json", "training_json", "zero_cost_json"):
         expanded = pd.json_normalize(df[col].apply(lambda s: json.loads(s) if s else {}))
         expanded.columns = [f"{col.removesuffix('_json')}.{c}" for c in expanded.columns]
         df = pd.concat([df.drop(columns=[col]), expanded], axis=1)

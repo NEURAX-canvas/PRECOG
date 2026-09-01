@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import subprocess
 import time
 from pathlib import Path
@@ -38,13 +39,22 @@ TASK_FUNCTIONS = ["Linear", "NonlinearInteraction", "NonlinearProduct"]
 
 
 def build_tasks(n_tasks: int) -> list[dict]:
-    """Generates a diverse batch of synthetic task configs (§13) to search over."""
+    """Generates a diverse batch of synthetic task configs (§13) to search over.
+
+    Draws noise/dimension/sample-size continuously from a per-task RNG rather
+    than cycling a small fixed grid: a fixed grid repeats every
+    lcm(len(functions), len(noise), len(n_samples)) tasks, which caps real
+    task diversity and lets a meta-model "memorize" a handful of buckets
+    instead of learning a genuine task -> H* relationship (§35 meta-overfitting risk).
+    """
     tasks = []
     for i in range(n_tasks):
+        rng = random.Random(2000 + i)
         function = TASK_FUNCTIONS[i % len(TASK_FUNCTIONS)]
-        input_dim = 6 if function != "Linear" else 4
-        noise_level = [0.0, 0.05, 0.1, 0.3][i % 4]
-        n_samples = [256, 512, 1024][i % 3]
+        min_dim = {"Linear": 2, "NonlinearInteraction": 4, "NonlinearProduct": 3}[function]
+        input_dim = rng.randint(min_dim, min_dim + 6)
+        noise_level = round(rng.uniform(0.0, 0.4), 3)
+        n_samples = rng.choice([128, 256, 384, 512, 768, 1024, 1536])
         tasks.append(
             {
                 "task_id": f"task_{i:03d}_{function}_noise{noise_level}_n{n_samples}",

@@ -80,7 +80,13 @@ def load_meta_dataset() -> pd.DataFrame:
     return best
 
 
-def run_trial_for_task(task_row: pd.Series, training: dict, seed: int) -> dict:
+def run_trial_for_task(
+    task_row: pd.Series,
+    training: dict,
+    seed: int,
+    max_steps: int = 800,
+    loss_threshold: float = 0.05,
+) -> dict:
     spec = {
         "task": {
             "function": task_row["task_id"].split("_")[2],
@@ -96,7 +102,7 @@ def run_trial_for_task(task_row: pd.Series, training: dict, seed: int) -> dict:
             "activation": task_row["model_features.activation"],
         },
         "training": training,
-        "protocol": {"loss_threshold": 0.05, "max_steps": 800, "seed": seed},
+        "protocol": {"loss_threshold": loss_threshold, "max_steps": max_steps, "seed": seed},
     }
     proc = subprocess.run(
         [str(TRIAL_BINARY)], input=json.dumps(spec), capture_output=True, text=True, timeout=120
@@ -104,6 +110,42 @@ def run_trial_for_task(task_row: pd.Series, training: dict, seed: int) -> dict:
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr)
     return json.loads(proc.stdout)
+
+
+# Calibrated in python/calibrate_probe.py: raw loss after 40 steps gave the
+# best and most stable rank correlation (Spearman rho=0.56) with the true
+# full-training ranking, on 40 training tasks -- clearly better than
+# normalizing by the initial loss, and budgets beyond 40 steps (80, 160)
+# didn't improve on it (diminishing returns, consistent with H5).
+PROBE_BUDGET = 40
+PROBE_OPTIMIZERS = ["Sgd", "Adam", "AdamW"]
+PROBE_INIT_METHODS = ["Xavier", "He"]
+
+
+def probe_pick_optimizer_init(
+    task_row: pd.Series, learning_rate: float, weight_decay: float, batch_size: int
+) -> tuple[str, str]:
+    """Picks (optimizer, init_method) by running a cheap 40-step probe for
+    each of the 6 combinations and keeping the one with the lowest raw loss
+    after the probe -- rather than the static classifier, which measured
+    worse than a majority-class baseline for both of these targets."""
+    best_combo, best_score = None, float("inf")
+    for optimizer in PROBE_OPTIMIZERS:
+        for init_method in PROBE_INIT_METHODS:
+            training = {
+                "learning_rate": learning_rate,
+                "weight_decay": weight_decay,
+                "batch_size": batch_size,
+                "optimizer": optimizer,
+                "init_method": init_method,
+            }
+            result = run_trial_for_task(
+                task_row, training, seed=0, max_steps=PROBE_BUDGET, loss_threshold=-1.0
+            )
+            score = result["final_loss"] if np.isfinite(result["final_loss"]) else float("inf")
+            if score < best_score:
+                best_score, best_combo = score, (optimizer, init_method)
+    return best_combo
 
 
 def main() -> None:
@@ -160,9 +202,12 @@ def main() -> None:
     print("(wins/ties/losses below are PREDICTED vs UNIVERSAL -- the actual H1-vs-H4 test;")
     print(" both are also compared against the naive default baseline for context.)")
     wins, ties, losses = 0, 0, 0
+    probe_wins, probe_ties, probe_losses = 0, 0, 0
+    classifier_correct, probe_correct = 0, 0
     all_predicted_steps: list[float] = []
     all_universal_steps: list[float] = []
     all_baseline_steps: list[float] = []
+    all_probed_steps: list[float] = []
     for idx, row in test_df.iterrows():
         features_row = x_test.loc[[idx]]
         predicted = {
@@ -185,7 +230,20 @@ def main() -> None:
             ),
         }
 
+        probed_optimizer, probed_init = probe_pick_optimizer_init(
+            row, predicted["learning_rate"], predicted["weight_decay"], predicted["batch_size"]
+        )
+        probed = {**predicted, "optimizer": probed_optimizer, "init_method": probed_init}
+
+        classifier_correct += (predicted["optimizer"] == row["training.optimizer"]) + (
+            predicted["init_method"] == row["training.init_method"]
+        )
+        probe_correct += (probed["optimizer"] == row["training.optimizer"]) + (
+            probed["init_method"] == row["training.init_method"]
+        )
+
         p_runs = [run_trial_for_task(row, predicted, seed=s) for s in range(n_seeds)]
+        pr_runs = [run_trial_for_task(row, probed, seed=s) for s in range(n_seeds)]
         u_runs = [run_trial_for_task(row, universal, seed=s) for s in range(n_seeds)]
         b_runs = [run_trial_for_task(row, BASELINE_TRAINING, seed=s) for s in range(n_seeds)]
 
@@ -195,21 +253,26 @@ def main() -> None:
             ]
 
         p_steps = penalized_steps(p_runs)
+        pr_steps = penalized_steps(pr_runs)
         u_steps = penalized_steps(u_runs)
         b_steps = penalized_steps(b_runs)
         all_predicted_steps.extend(p_steps)
+        all_probed_steps.extend(pr_steps)
         all_universal_steps.extend(u_steps)
         all_baseline_steps.extend(b_steps)
         p_mean, p_conv = float(np.mean(p_steps)), sum(r["converged"] for r in p_runs)
+        pr_mean, pr_conv = float(np.mean(pr_steps)), sum(r["converged"] for r in pr_runs)
         u_mean, u_conv = float(np.mean(u_steps)), sum(r["converged"] for r in u_runs)
         b_mean, b_conv = float(np.mean(b_steps)), sum(r["converged"] for r in b_runs)
 
         print(
             f"task={row['task_id']:<40} "
             f"predicted={p_mean:.0f}({p_conv}/{n_seeds})  "
+            f"probed={pr_mean:.0f}({pr_conv}/{n_seeds})  "
             f"universal={u_mean:.0f}({u_conv}/{n_seeds})  "
             f"baseline={b_mean:.0f}({b_conv}/{n_seeds})  "
-            f"predicted_config={predicted}"
+            f"predicted_config={predicted}  probed_opt_init={(probed_optimizer, probed_init)}  "
+            f"true_opt_init=({row['training.optimizer']}, {row['training.init_method']})"
         )
 
         if p_mean < u_mean:
@@ -218,6 +281,13 @@ def main() -> None:
             ties += 1
         else:
             losses += 1
+
+        if pr_mean < p_mean:
+            probe_wins += 1
+        elif pr_mean == p_mean:
+            probe_ties += 1
+        else:
+            probe_losses += 1
 
     n = len(test_df)
 
@@ -248,6 +318,14 @@ def main() -> None:
 
     print("\n[headline, same as before] predicted vs naive default baseline:")
     report_pair("predicted", all_predicted_steps, "baseline", all_baseline_steps)
+
+    print(f"\n[few-step probe, §15/H5] optimizer/init_method: static classifier vs 40-step probe")
+    print(f"exact-match hits out of {2 * n} (optimizer + init_method per task):")
+    print(f"  static classifier: {classifier_correct}/{2 * n} ({100 * classifier_correct / (2 * n):.0f}%)")
+    print(f"  probe-corrected:   {probe_correct}/{2 * n} ({100 * probe_correct / (2 * n):.0f}%)")
+    print(f"probe-corrected config beats classifier-only config on {probe_wins}/{n} tasks "
+          f"(ties={probe_ties}, losses={probe_losses})")
+    report_pair("probed", all_probed_steps, "predicted", all_predicted_steps, probe_wins)
 
 
 if __name__ == "__main__":

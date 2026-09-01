@@ -19,6 +19,9 @@ class InitMethod(str, Enum):
     XAVIER = "xavier"
     HE = "he"
     ORTHOGONAL = "orthogonal"
+    LSUV = "lsuv"  # data-aware (Mishkin & Matas, 2015; source.md pillar 4's
+    # "data-aware init" entry -- named in the old v0 README too, never
+    # actually implemented there or here until now.
 
 
 _ACTIVATION_MODULES = {Activation.RELU: nn.ReLU, Activation.TANH: nn.Tanh}
@@ -32,19 +35,34 @@ class ModelArchitecture:
     activation: Activation
 
 
-def build_mlp(architecture: ModelArchitecture, init_method: InitMethod) -> nn.Sequential:
+def build_mlp(
+    architecture: ModelArchitecture, init_method: InitMethod, data_sample: torch.Tensor | None = None
+) -> nn.Sequential:
+    """`data_sample` (a real mini-batch of x) is required for
+    InitMethod.LSUV and ignored otherwise -- it's the one init method here
+    that is data-*aware* rather than purely analytic (docs.md §9.2's PURE-
+    mode contract still holds: this only ever does forward passes, no
+    optimizer.step(), so it stays within PURE per §5)."""
+    build_init = InitMethod.ORTHOGONAL if init_method == InitMethod.LSUV else init_method
     layers: list[nn.Module] = []
     in_dim = architecture.input_dim
     for _ in range(architecture.depth):
         linear = nn.Linear(in_dim, architecture.width)
-        _init_layer(linear, init_method, nonlinearity=architecture.activation)
+        _init_layer(linear, build_init, nonlinearity=architecture.activation)
         layers.append(linear)
         layers.append(_ACTIVATION_MODULES[architecture.activation]())
         in_dim = architecture.width
     head = nn.Linear(in_dim, 1)
-    _init_layer(head, init_method, nonlinearity=None)
+    _init_layer(head, build_init, nonlinearity=None)
     layers.append(head)
-    return nn.Sequential(*layers)
+    model = nn.Sequential(*layers)
+
+    if init_method == InitMethod.LSUV:
+        if data_sample is None:
+            raise ValueError("InitMethod.LSUV needs a real data_sample to calibrate against")
+        _apply_lsuv(model, data_sample)
+
+    return model
 
 
 def _init_layer(layer: nn.Linear, init_method: InitMethod, nonlinearity: Activation | None) -> None:
@@ -57,6 +75,31 @@ def _init_layer(layer: nn.Linear, init_method: InitMethod, nonlinearity: Activat
     elif init_method == InitMethod.ORTHOGONAL:
         nn.init.orthogonal_(layer.weight, gain=gain)
     nn.init.zeros_(layer.bias)
+
+
+@torch.no_grad()
+def _apply_lsuv(
+    model: nn.Sequential, x: torch.Tensor, target_var: float = 1.0, tol: float = 0.1, max_iters: int = 10
+) -> None:
+    """LSUV (Mishkin & Matas, 2015, "All you need is a good init"): starting
+    from an orthogonal init, rescale each layer's weights in sequence so its
+    pre-activation output variance on a real batch is ~1 -- an empirical,
+    data-calibrated alternative to the purely analytic Xavier/He/Orthogonal
+    formulas, matching the "variance preservation" goal dynamical isometry
+    pursues analytically (source.md pillar 4) but tuned to the actual data
+    instead of an assumed input distribution."""
+    h = x
+    for layer in model:
+        if isinstance(layer, nn.Linear):
+            for _ in range(max_iters):
+                out = layer(h)
+                var = out.var().item()
+                if abs(var - target_var) < tol or var < 1e-8:
+                    break
+                layer.weight.mul_((target_var / var) ** 0.5)
+            h = layer(h)
+        else:
+            h = layer(h)
 
 
 def model_features(model: nn.Sequential, architecture: ModelArchitecture, init_method: InitMethod) -> dict:

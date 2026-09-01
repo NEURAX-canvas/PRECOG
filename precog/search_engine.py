@@ -61,12 +61,29 @@ class SearchEngine:
         n_trials: int,
         target_steps: float,
         lr_bounds: tuple[float, float] = (1e-4, 1e-1),
+        fixed_init: InitMethod | None = None,
+        log_run: tuple[str, int, str] | None = None,
     ) -> SearchResult:
+        """`log_run`, when given as (run_label, task_seed, arm), records
+        every trial via precog.experiment_db.record_search_trial (docs.md
+        §12: "every experiment must be recorded" -- search trials included,
+        kept in their own table since they aren't part of the meta-dataset's
+        controlled train/test split, see experiment_db.py's schema comment)."""
+        """`fixed_init`, when set, *restricts* the search to that single
+        init_method instead of merely seeding one trial with it (docs.md
+        §9.8's "Rank/Optimize" step acting on a narrowed candidate set) --
+        every trial then goes toward refining learning_rate alone. This is
+        the real test of whether trusting a recommendation pays off: it
+        removes the 3x larger joint (LR, init) space for the trials that
+        would otherwise be spent re-discovering init_method from scratch,
+        at the risk of locking in a wrong choice if the recommendation is
+        wrong (§27: a bad prior isn't free)."""
         study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=self.seed))
 
-        if recommendation is not None:
+        if recommendation is not None and fixed_init is None:
             # §9.8: the Meta-Predictor's own top pick seeds the first trial
-            # instead of the search starting cold.
+            # instead of the search starting cold (weak signal: one trial
+            # among many, see results/reports/*_gate3_search_efficiency.md).
             study.enqueue_trial({"learning_rate": lr_bounds[0] * (lr_bounds[1] / lr_bounds[0]) ** 0.5,
                                   "init_method": recommendation.recommended_init.value})
 
@@ -77,9 +94,10 @@ class SearchEngine:
         def wrapped_objective(trial: optuna.Trial) -> float:
             nonlocal trials_to_target
             lr = trial.suggest_float("learning_rate", *lr_bounds, log=True)
-            init_name = trial.suggest_categorical(
-                "init_method", [m.value for m in InitMethod]
-            )
+            if fixed_init is not None:
+                init_name = fixed_init.value
+            else:
+                init_name = trial.suggest_categorical("init_method", [m.value for m in InitMethod])
             steps = objective_fn(lr, InitMethod(init_name))
 
             diversity_penalty = 0.0
@@ -95,6 +113,14 @@ class SearchEngine:
             score = steps + diversity_penalty * steps  # penalize near-duplicates, not free exploration
             history.append({"trial": trial.number, "learning_rate": lr, "init_method": init_name,
                              "steps": steps, "score": score})
+            if log_run is not None:
+                run_label, task_seed, arm = log_run
+                from precog.experiment_db import record_search_trial
+
+                record_search_trial(
+                    run_label=run_label, seed=task_seed, arm=arm, trial_number=trial.number,
+                    learning_rate=lr, init_method=init_name, steps_to_threshold=steps,
+                )
             if trials_to_target is None and steps <= target_steps:
                 trials_to_target = trial.number + 1
             return score
@@ -102,10 +128,11 @@ class SearchEngine:
         study.optimize(wrapped_objective, n_trials=n_trials)
 
         best = study.best_params
+        best_init = fixed_init if fixed_init is not None else InitMethod(best["init_method"])
         best_steps = min(h["steps"] for h in history if h["trial"] == study.best_trial.number)
         return SearchResult(
             best_learning_rate=best["learning_rate"],
-            best_init=InitMethod(best["init_method"]),
+            best_init=best_init,
             best_steps=best_steps,
             trials_to_target=trials_to_target,
             n_trials=n_trials,

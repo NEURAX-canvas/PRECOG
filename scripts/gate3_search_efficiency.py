@@ -92,8 +92,13 @@ def main() -> None:
         zc_by_candidate = compute_candidate_zero_cost(architecture, task_config.input_dim, x, y)
         recommendation = predictor.recommend(engineered, zc_by_candidate)
 
-        informed = SearchEngine(seed=0).search(objective_fn, recommendation, N_TRIALS, TARGET_STEPS)
-        cold = SearchEngine(seed=0).search(objective_fn, None, N_TRIALS, TARGET_STEPS)
+        run_label = "gate3_search_efficiency"
+        informed = SearchEngine(seed=0).search(
+            objective_fn, recommendation, N_TRIALS, TARGET_STEPS, log_run=(run_label, int(seed), "informed")
+        )
+        cold = SearchEngine(seed=0).search(
+            objective_fn, None, N_TRIALS, TARGET_STEPS, log_run=(run_label, int(seed), "cold")
+        )
 
         rows.append({
             "seed": seed, "informed_trials_to_target": informed.trials_to_target,

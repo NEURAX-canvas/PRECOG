@@ -9,15 +9,16 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from precog.experiment_db import load_dataframe, load_gate_history
+from precog.experiment_db import load_dataframe, load_gate_history, load_search_trials
 
 RESULTS_DIR = Path(__file__).resolve().parents[1] / "results"
 REPORTS_DIR = RESULTS_DIR / "reports"
 
 
 def export_csv_snapshots() -> None:
-    """Refreshes results/experiments.csv and results/gate_evaluations.csv
-    from the current state of the meta-dataset (§12/§17)."""
+    """Refreshes results/experiments.csv, results/gate_evaluations.csv and
+    results/search_trials.csv from the current state of the meta-dataset
+    (§12/§17)."""
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     experiments = load_dataframe()
@@ -25,6 +26,9 @@ def export_csv_snapshots() -> None:
 
     gates = load_gate_history()
     gates.to_csv(RESULTS_DIR / "gate_evaluations.csv", index=False)
+
+    search_trials = load_search_trials()
+    search_trials.to_csv(RESULTS_DIR / "search_trials.csv", index=False)
 
 
 def write_report(slug: str, title: str, body_markdown: str) -> Path:

@@ -71,6 +71,26 @@ CREATE TABLE IF NOT EXISTS gate_evaluations (
     n_samples INTEGER,
     notes TEXT
 );
+
+-- Search Engine trials (docs.md §9.8, §12 "every experiment must be
+-- recorded"): kept in a *separate* table from `experiments`, not tagged
+-- with a split value, because these are candidate configs a search
+-- explored on a task -- not the controlled, one-per-init observations the
+-- meta-dataset's train/test split is built from. Mixing them into
+-- `experiments` would silently break every script that assumes exactly one
+-- row per (task, init) at the fixed search-space point build_meta_dataset.py
+-- established.
+CREATE TABLE IF NOT EXISTS search_trials (
+    trial_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+    run_label TEXT NOT NULL,
+    seed INTEGER NOT NULL,
+    arm TEXT NOT NULL,
+    trial_number INTEGER NOT NULL,
+    learning_rate REAL NOT NULL,
+    init_method TEXT NOT NULL,
+    steps_to_threshold REAL NOT NULL
+);
 """
 
 
@@ -128,6 +148,35 @@ def record_experiment(
             ),
         )
         return cursor.lastrowid
+
+
+def record_search_trial(
+    *,
+    run_label: str,
+    seed: int,
+    arm: str,
+    trial_number: int,
+    learning_rate: float,
+    init_method: str,
+    steps_to_threshold: float,
+) -> int:
+    with connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO search_trials (
+                run_label, seed, arm, trial_number, learning_rate, init_method, steps_to_threshold
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (run_label, seed, arm, trial_number, learning_rate, init_method, steps_to_threshold),
+        )
+        return cursor.lastrowid
+
+
+def load_search_trials():
+    import pandas as pd
+
+    with connect() as conn:
+        return pd.read_sql_query("SELECT * FROM search_trials ORDER BY timestamp", conn)
 
 
 def record_gate_evaluation(

@@ -18,3 +18,5 @@ evaluation_id,timestamp,generation,gate_number,metric_name,metric_value,threshol
 17,2026-09-01 13:04:01,v1-meta-predictor-log_rf,2,top1_accuracy_init_method_adapted_recall_at_10,0.125,0.8,0,16,"universal_baseline=0.56, random_baseline=0.33, mean_confidence=0.68, winner=no"
 18,2026-09-01 13:04:01,v1-meta-predictor-knn,2,top1_accuracy_init_method_adapted_recall_at_10,0.375,0.8,0,16,"universal_baseline=0.56, random_baseline=0.33, mean_confidence=0.45, winner=no"
 19,2026-09-01 13:07:05,v1-search-engine,3,mean_trial_reduction_informed_vs_cold,-0.11363636363636363,0.5,0,11,"16 test tasks, 15 trials/search, target_steps=150.0, only_informed_reached=0, neither_reached=5"
+20,2026-09-01 13:17:50,v1-search-engine-restricted,3,informed_restricted_near_optimal_rate,0.6875,0.8,0,16,"cold=0.75, universal_restricted=0.56, reference=40 trials, restricted=15 trials"
+21,2026-09-01 13:30:26,v1-search-engine-restricted,3,informed_restricted_near_optimal_rate,0.6875,0.8,0,16,"cold=0.75, universal_restricted=0.56, reference=40 trials, restricted=15 trials"

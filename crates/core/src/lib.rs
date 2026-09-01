@@ -102,6 +102,7 @@ pub struct TrialResult {
     pub model_features: ModelFeatures,
     pub training: TrainingConfig,
     pub steps_to_threshold: Option<usize>,
+    pub initial_loss: f64,
     pub final_loss: f64,
     pub converged: bool,
     pub diverged: bool,

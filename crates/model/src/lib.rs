@@ -125,6 +125,7 @@ impl Mlp {
 pub struct TrainOutcome {
     pub model_features: ModelFeatures,
     pub steps_to_threshold: Option<usize>,
+    pub initial_loss: f64,
     pub final_loss: f64,
     pub converged: bool,
     pub diverged: bool,
@@ -219,6 +220,7 @@ pub fn train(
     order.shuffle(&mut rng);
 
     let mut steps_to_threshold = None;
+    let mut initial_loss = f64::NAN;
     let mut final_loss = f64::NAN;
     let mut diverged = false;
     let mut grad_norm_initial = 0.0;
@@ -255,6 +257,9 @@ pub fn train(
         let loss = diff.sqr()?.mean_all()?;
 
         let loss_value = loss.to_scalar::<f32>()? as f64;
+        if step == 0 {
+            initial_loss = loss_value;
+        }
 
         if !loss_value.is_finite() {
             diverged = true;
@@ -284,6 +289,7 @@ pub fn train(
     Ok(TrainOutcome {
         model_features,
         steps_to_threshold,
+        initial_loss,
         final_loss,
         converged,
         diverged,

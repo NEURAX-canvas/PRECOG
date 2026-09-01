@@ -46,6 +46,7 @@ fn main() -> Result<()> {
         model_features: outcome.model_features,
         training: spec.training,
         steps_to_threshold: outcome.steps_to_threshold,
+        initial_loss: outcome.initial_loss,
         final_loss: outcome.final_loss,
         converged: outcome.converged,
         diverged: outcome.diverged,

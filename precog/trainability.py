@@ -138,6 +138,27 @@ def jacob_cov(model: nn.Sequential, x: torch.Tensor) -> float:
     return float(logabsdet.item())
 
 
+def jacob_cov_averaged(
+    model: nn.Sequential, x: torch.Tensor, n_batches: int = 5, batch_size: int = 64, seed: int = 0
+) -> float:
+    """Variance-reduction attempt on jacob_cov: `zero_cost_features()` always
+    scores the *same, fixed* leading slice of `x` (never a random draw), so
+    the single score it returns is one noisy sample of whatever those
+    particular rows happen to produce. Averages jacob_cov over `n_batches`
+    independent random subsets of `x` (same size, same PURE-mode
+    computation each time, DeltaW=0 throughout) to test whether that noise
+    reduction improves downstream decision quality (regret) on top of
+    zc_jacobcov -- the best-evidenced method in this project so far."""
+    n = x.shape[0]
+    size = min(batch_size, n)
+    generator = torch.Generator().manual_seed(seed)
+    scores = []
+    for _ in range(n_batches):
+        idx = torch.randperm(n, generator=generator)[:size]
+        scores.append(jacob_cov(model, x[idx]))
+    return float(sum(scores) / len(scores))
+
+
 def effective_rank(model: nn.Sequential, x: torch.Tensor) -> float:
     """NEAR-style expressivity proxy: effective rank (Roy & Vetterli) of the
     last hidden layer's activations, erank = exp(entropy(normalized
@@ -339,6 +360,7 @@ def zero_cost_features(
         "snip": snip(model, x, y, loss_fn),
         "grasp": grasp(model, x, y, loss_fn),
         "jacob_cov": jacob_cov(model, x),
+        "jacob_cov_avg": jacob_cov_averaged(model, x),
         "effective_rank": effective_rank(model, x),
         "hessian_trace": hessian_trace(model, x, y, loss_fn),
         "gradient_alignment": gradient_alignment(model, x, y, loss_fn),

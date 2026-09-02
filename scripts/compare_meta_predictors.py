@@ -64,6 +64,7 @@ from precog.meta_predictor import (
     GPMetaPredictor,
     KNNMetaPredictor,
     MetaPredictor,
+    TieBreakHeuristicPredictor,
     ZeroCostHeuristicPredictor,
     compute_candidate_zero_cost,
     engineer_features,
@@ -184,6 +185,34 @@ def main() -> None:
     # 0.395, scripts/gate1_ranking_at_scale.py) -- worth testing directly as
     # a decision heuristic too, not just for ranking correlation.
     candidates["zc_gradnorm"] = ZeroCostHeuristicPredictor("gradient_norm", higher_is_better=False)
+    # Variance-reduction attempt on the champion heuristic: average jacob_cov
+    # over several random mini-batches instead of one fixed slice of x
+    # (precog.trainability.jacob_cov_averaged). Tests whether reducing noise
+    # in the winning proxy improves decision quality further.
+    candidates["zc_jacobcov_avg"] = ZeroCostHeuristicPredictor("jacob_cov_avg", higher_is_better=False)
+    # Root-caused fix (precog.meta_predictor.TieBreakHeuristicPredictor):
+    # jacob_cov is provably identical between xavier/he (same underlying
+    # Gaussian draws, rescaled -- sign-invariant), so raw zc_jacobcov never
+    # once recommends "he". Break that exact tie with gradient_norm, which
+    # differs sharply by init and can actually discriminate them.
+    candidates["zc_jacobcov_tiebreak"] = TieBreakHeuristicPredictor(
+        primary_proxy="jacob_cov", secondary_proxy="gradient_norm",
+        primary_higher_is_better=False, secondary_higher_is_better=False,
+    )
+    # Second fix attempt for the same root cause: gradient_norm as a
+    # per-init-family-normalized tiebreaker, since raw gradient_norm turned
+    # out to have the same problem (he > xavier on 312/312 tasks -- a fixed
+    # scale confound, not task signal). Population stats from TRAIN only.
+    gradnorm_pop_stats = {
+        init: (float(train_df.loc[train_df["training.init_method"] == init, "zero_cost.gradient_norm"].mean()),
+               float(train_df.loc[train_df["training.init_method"] == init, "zero_cost.gradient_norm"].std()))
+        for init in train_df["training.init_method"].unique()
+    }
+    candidates["zc_jacobcov_normtiebreak"] = TieBreakHeuristicPredictor(
+        primary_proxy="jacob_cov", secondary_proxy="gradient_norm",
+        primary_higher_is_better=False, secondary_higher_is_better=False,
+        secondary_population_stats=gradnorm_pop_stats,
+    )
 
     print(f"Baselines: universal={universal_accuracy:.0%} (mean_regret={universal_mean_regret:+.1f} steps)  "
           f"random={random_baseline:.0%} (mean_regret={random_mean_regret:+.1f} steps)\n")

@@ -354,6 +354,85 @@ class ZeroCostHeuristicPredictor:
         )
 
 
+class TieBreakHeuristicPredictor:
+    """Fixes a root-caused blind spot found in zc_jacobcov (the project's
+    best-evidenced method so far): jacob_cov is a function of each sample's
+    binary activation *sign* pattern only, which is invariant to rescaling
+    every layer's weights by a positive constant. Xavier and He both draw
+    from the same underlying Gaussian random values (same shape, same
+    global RNG state, same `.normal_()` call under the hood) and only
+    differ in the positive std they scale by, with zero-initialized biases
+    -- so their jacob_cov score is *exactly* identical, verified across all
+    312 meta-dataset tasks (max |xavier - he| jacob_cov = 0.0). This isn't
+    noise; jacob_cov structurally cannot ever distinguish them. Since
+    InitMethod.XAVIER is listed before InitMethod.HE in
+    CANDIDATE_INIT_METHODS, `min()` silently always breaks that exact tie
+    in Xavier's favor, which is why the raw zc_jacobcov heuristic never
+    once recommends "he" across the entire locked test split, even on the
+    10 tasks where "he" is genuinely the true best init.
+
+    `secondary_proxy` breaks ties on a *scale-sensitive* signal instead:
+    gradient_norm differs sharply by init (he substantially higher on
+    average than xavier/orthogonal in this meta-dataset), so it can
+    actually discriminate the exact case jacob_cov cannot.
+    """
+
+    def __init__(
+        self,
+        primary_proxy: str = "jacob_cov",
+        secondary_proxy: str = "gradient_norm",
+        primary_higher_is_better: bool = False,
+        secondary_higher_is_better: bool = False,
+        tie_tolerance: float = 1e-6,
+        secondary_population_stats: dict[str, tuple[float, float]] | None = None,
+    ):
+        self.primary_proxy = primary_proxy
+        self.secondary_proxy = secondary_proxy
+        self.primary_higher_is_better = primary_higher_is_better
+        self.secondary_higher_is_better = secondary_higher_is_better
+        self.tie_tolerance = tie_tolerance
+        # When set, the secondary proxy is z-scored against each candidate's
+        # own init-family population stats before breaking ties -- fixes
+        # gradient_norm's own fixed scale confound (he > xavier on 312/312
+        # tasks by a constant-ish ratio), not just jacob_cov's exact tie.
+        self.secondary_population_stats = secondary_population_stats
+
+    def recommend(self, features_row: pd.DataFrame, zero_cost_by_candidate: dict[InitMethod, dict]) -> Recommendation:
+        per_candidate = {
+            c.value: {
+                "expected_steps": float("nan"), "std_steps": 0.0,
+                "primary_score": zc[self.primary_proxy], "secondary_score": zc[self.secondary_proxy],
+            }
+            for c, zc in zero_cost_by_candidate.items()
+        }
+        primary_sign = -1 if self.primary_higher_is_better else 1
+        primary_values = {k: v["primary_score"] * primary_sign for k, v in per_candidate.items()}
+        best_primary = min(primary_values.values())
+        tied = [k for k, v in primary_values.items() if abs(v - best_primary) <= self.tie_tolerance]
+
+        if len(tied) == 1:
+            best_init_name = tied[0]
+        else:
+            secondary_sign = -1 if self.secondary_higher_is_better else 1
+
+            def secondary_key(k: str) -> float:
+                score = per_candidate[k]["secondary_score"]
+                if self.secondary_population_stats is not None:
+                    mean, std = self.secondary_population_stats[k]
+                    score = (score - mean) / (std + 1e-12)
+                return score * secondary_sign
+
+            best_init_name = min(tied, key=secondary_key)
+
+        return Recommendation(
+            recommended_init=InitMethod(best_init_name),
+            expected_steps=float("nan"),
+            steps_range=(float("nan"), float("nan")),
+            confidence=float("nan"),  # this method makes no probabilistic claim -- see docs.md §20
+            per_candidate=per_candidate,
+        )
+
+
 class KNNMetaPredictor:
     """Alternative to the RandomForest MetaPredictor (docs.md §19 ablation
     spirit): predicts purely from the Meta-Knowledge Base's (§9.6) nearest

@@ -179,6 +179,11 @@ def main() -> None:
     # steps = worse, hence higher_is_better=False for both).
     candidates["zc_gradnormvar"] = ZeroCostHeuristicPredictor("gradient_norm_variance", higher_is_better=False)
     candidates["zc_jacobcov"] = ZeroCostHeuristicPredictor("jacob_cov", higher_is_better=False)
+    # gradient_norm, not gradient_norm_variance, is the strongest individual
+    # ranking proxy once checked at full meta-dataset scale (rho=0.540 vs
+    # 0.395, scripts/gate1_ranking_at_scale.py) -- worth testing directly as
+    # a decision heuristic too, not just for ranking correlation.
+    candidates["zc_gradnorm"] = ZeroCostHeuristicPredictor("gradient_norm", higher_is_better=False)
 
     print(f"Baselines: universal={universal_accuracy:.0%} (mean_regret={universal_mean_regret:+.1f} steps)  "
           f"random={random_baseline:.0%} (mean_regret={random_mean_regret:+.1f} steps)\n")

@@ -20,9 +20,13 @@ is an *input* (one-hot `candidate_init.*`), and the target is that
 candidate's own expected steps_to_threshold. The zero-cost score computed
 under that exact candidate init is not leakage in this framing -- it is
 exactly the signal scripts/gate1_ranking.py validated (§21's controlled
-experiment: gradient_norm_variance alone reaches rho=0.670 against real
-convergence speed). Leaving it out was throwing away the single best
-validated signal in the whole project. X_ZC is now included, computed
+experiment; the individual proxy rho values reported there were later
+found to be small-sample overestimates -- see
+scripts/gate1_ranking_at_scale.py, which rechecks the same design on the
+full 312-task meta-dataset and finds gradient_norm the strongest individual
+proxy at rho=0.540, not gradient_norm_variance's originally-reported
+0.670). Leaving X_ZC out entirely was still throwing away real, validated
+signal even at the corrected magnitude. X_ZC is now included, computed
 per-candidate at both fit and predict time.
 
 For V1 scope (§25: Learning Rate, Batch Size, Optimizer, Initialization),
@@ -322,8 +326,10 @@ class ZeroCostHeuristicPredictor:
     testing on its own merits: the learned RandomForest wrapper (44-48%
     accuracy) barely beats the universal baseline, so it's a fair question
     whether the wrapper is adding value over the raw signal Gate 1 already
-    validated (gradient_norm_variance alone: rho=0.670, the single strongest
-    proxy found).
+    validated (gradient_norm alone: rho=0.540 at full meta-dataset scale,
+    see scripts/gate1_ranking_at_scale.py -- the single strongest individual
+    proxy found, correcting gate1_ranking.py's original small-sample
+    gradient_norm_variance rho=0.670 estimate).
 
     Needs zero training data at all -- this is the "PRECOG-0" tier
     (docs.md's own §19.1 ablation ladder starts at "Zero-Cost only")."""
